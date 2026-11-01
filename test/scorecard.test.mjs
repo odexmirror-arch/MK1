@@ -129,3 +129,53 @@ test('per-trader "copy every trade": no chase limit and top-ups copied, other tr
   assert.equal(c.status, 'skipped');
   assert.match(c.reason, /price moved too far/);
 });
+
+test('date filter: traderScorecard and pnlSummary filter performance per trader wallet by date range', async () => {
+  const { e, f } = setup();
+  const f2 = {
+    ...f,
+    id: 'fol-sc-2',
+    name: 't2',
+    handle: 'trader2',
+    traderWallet: 'H8sMJSCQxfKiFTCfDR3DUMLPwcRbM61LGFJ8N4dK3WjS',
+  };
+  e.follows.push(f2);
+
+  await roundTrip(e, f, 101, { ourEntry: 1.02, traderExit: 1.5, lag: 1 });
+  await roundTrip(e, f2, 102, { ourEntry: 1.1, traderExit: 0.7, lag: 4 });
+  const day1 = new Date('2026-10-25T12:00:00Z').getTime();
+  const day2 = new Date('2026-11-01T12:00:00Z').getTime();
+  e.realizedLog[0].t = day1;
+  e.realizedLog[1].t = day1 + 5000;
+
+  await roundTrip(e, f, 103, { ourEntry: 1.08, traderExit: 0.6, lag: 2 });
+  await roundTrip(e, f2, 104, { ourEntry: 1.01, traderExit: 1.8, lag: 1 });
+  e.realizedLog[2].t = day2;
+  e.realizedLog[3].t = day2 + 5000;
+
+  const day1Summary = e.pnlSummary({ from: day1 - 1000, to: day1 + 60_000, paper: true });
+  assert.equal(day1Summary.traderScores[f.id].trades, 1);
+  assert.equal(day1Summary.traderScores[f.id].wins, 1);
+  assert.equal(day1Summary.traderScores[f.id].losses, 0);
+  assert.equal(day1Summary.traderScores[f.id].losingStreak, 0);
+  assert.ok(day1Summary.traderScores[f.id].pnlUsd > 0);
+
+  assert.equal(day1Summary.traderScores[f2.id].trades, 1);
+  assert.equal(day1Summary.traderScores[f2.id].wins, 0);
+  assert.equal(day1Summary.traderScores[f2.id].losses, 1);
+  assert.equal(day1Summary.traderScores[f2.id].losingStreak, 1);
+  assert.ok(day1Summary.traderScores[f2.id].pnlUsd < 0);
+
+  const day2Summary = e.pnlSummary({ from: day2 - 1000, to: day2 + 60_000, paper: true });
+  assert.equal(day2Summary.traderScores[f.id].trades, 1);
+  assert.equal(day2Summary.traderScores[f.id].wins, 0);
+  assert.equal(day2Summary.traderScores[f.id].losses, 1);
+  assert.equal(day2Summary.traderScores[f.id].losingStreak, 1);
+  assert.ok(day2Summary.traderScores[f.id].pnlUsd < 0);
+
+  assert.equal(day2Summary.traderScores[f2.id].trades, 1);
+  assert.equal(day2Summary.traderScores[f2.id].wins, 1);
+  assert.equal(day2Summary.traderScores[f2.id].losses, 0);
+  assert.equal(day2Summary.traderScores[f2.id].losingStreak, 0);
+  assert.ok(day2Summary.traderScores[f2.id].pnlUsd > 0);
+});

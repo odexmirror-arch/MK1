@@ -1443,6 +1443,7 @@ export class CopyTradingEngine {
       closes: positionClosed, // this sell closed the position (one trade)
       posPnl: positionClosed ? Number(Number(pos.realizedPnlUsd || 0).toFixed(2)) : null, // whole trade's PnL
       fid: pos.followId || null,
+      wallet: pos.traderWallet || null,
       // scorecard (closing sell only): hold time, entry / exit slip vs the trader, detection delay
       ...(positionClosed
         ? {
@@ -1957,14 +1958,32 @@ export class CopyTradingEngine {
   /**
    * Trader scorecard from the permanent PnL log: real win rate, average hold time and how far the
    * copies slip behind the trader (entry, exit, detection delay). `since` = only trades after
-   * that time (set when a trader paused for being too fast is resumed).
+   * that time (set when a trader paused for being too fast is resumed); `from` / `to` filter by
+   * date range.
    */
-  traderScorecard(followId, { paper = Boolean(this.settings.paperTrading), since = 0 } = {}) {
+  traderScorecard(followId, { paper = Boolean(this.settings.paperTrading), since = 0, from = 0, to = 0 } = {}) {
     const avg = (a) => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : null);
-    const rows = (this.realizedLog || []).filter((r) => r.fid === followId && r.closes && Boolean(r.paper) === Boolean(paper) && r.t >= since);
-    const pnls = rows.map((r) => (Number.isFinite(r.posPnl) ? r.posPnl : r.pnl));
+    const follow = (this.follows || []).find((f) => f.id === followId);
+    const wallet = follow?.traderWallet || null;
+    const start = Math.max(Number(since) || 0, Number(from) || 0);
+    const end = to > 0 ? Number(to) : Infinity;
+    const rows = (this.realizedLog || []).filter(
+      (r) =>
+        (r.fid === followId || (wallet && r.wallet && r.wallet === wallet)) &&
+        (r.closes === undefined || r.closes) &&
+        Boolean(r.paper) === Boolean(paper) &&
+        Number.isFinite(r.t) &&
+        r.t >= start &&
+        r.t <= end
+    );
+    const pnls = rows.map((r) => (Number.isFinite(r.posPnl) ? r.posPnl : r.pnl)).filter(Number.isFinite);
     const wins = pnls.filter((p) => p > 0).length;
     const losses = pnls.filter((p) => p < 0).length;
+    let losingStreak = 0;
+    for (let i = pnls.length - 1; i >= 0; i--) {
+      if (pnls[i] < 0) losingStreak += 1;
+      else if (pnls[i] > 0) break;
+    }
     const held = rows.map((r) => r.held).filter(Number.isFinite);
     const slipIn = rows.map((r) => r.slipIn).filter(Number.isFinite);
     const slipOut = rows.map((r) => r.slipOut).filter(Number.isFinite);
@@ -1978,6 +1997,7 @@ export class CopyTradingEngine {
       trades: rows.length,
       wins,
       losses,
+      losingStreak,
       winRatePct: wins + losses > 0 ? Number(((wins / (wins + losses)) * 100).toFixed(1)) : null,
       pnlUsd: Number(pnls.reduce((a, b) => a + b, 0).toFixed(2)),
       avgHoldSec: held.length ? Math.round(avg(held)) : null,
@@ -1998,9 +2018,11 @@ export class CopyTradingEngine {
     let filled = 0;
     const byId = new Map(this.positions.map((p) => [p.id, p]));
     for (const r of this.realizedLog || []) {
-      if (r.fid || !r.pid) continue;
+      if (!r.pid) continue;
       const p = byId.get(r.pid);
-      if (!p?.followId) continue;
+      if (!p) continue;
+      if (!r.wallet && p.traderWallet) r.wallet = p.traderWallet;
+      if (r.fid || !p.followId) continue;
       r.fid = p.followId;
       if (r.closes && r.held === undefined) {
         const buy = this.history.find((h) => h.side === 'buy' && h.status === 'filled' && h.tokenAddress === p.tokenAddress && h.followId === p.followId && Math.abs((h.timestamp || 0) - (p.openedAt || 0)) < 120_000);
@@ -2079,6 +2101,7 @@ export class CopyTradingEngine {
     }
     // copied buys in the period (full history kept on the server, last 2 days)
     const copiedBuys = (this.history || []).filter((h) => h.side === 'buy' && h.status === 'filled' && Boolean(h.isPaper) === Boolean(paper) && h.timestamp >= from && h.timestamp <= end).length;
+    const traderScores = Object.fromEntries((this.follows || []).map((f) => [f.id, this.traderScorecard(f.id, { paper, from, to })]));
     return {
       from,
       to: to > 0 ? to : null,
@@ -2092,6 +2115,7 @@ export class CopyTradingEngine {
       trades,
       wins,
       losses,
+      traderScores,
     };
   }
 
@@ -2268,7 +2292,7 @@ export class CopyTradingEngine {
     this.history.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
     this.realizedLog.push({
       t: at, pnl: receipt.pnlUsd, paper: false, sym: pos.symbol, cost: Number(costBasisSoldUsd.toFixed(4)), sol: px > 0 ? Number((receipt.pnlUsd / px).toFixed(6)) : null,
-      pid: pos.id, closes: true, posPnl: Number(Number(pos.realizedPnlUsd || 0).toFixed(2)), fid: pos.followId || null,
+      pid: pos.id, closes: true, posPnl: Number(Number(pos.realizedPnlUsd || 0).toFixed(2)), fid: pos.followId || null, wallet: pos.traderWallet || null,
       held: Math.max(0, Math.round((at - pos.openedAt) / 1000)), slipIn: Number.isFinite(pos.entrySlipPct) ? pos.entrySlipPct : null, slipOut: null, lag: Number.isFinite(pos.detectLagSec) ? pos.detectLagSec : null,
     });
     this.realizedLog.sort((a, b) => a.t - b.t);

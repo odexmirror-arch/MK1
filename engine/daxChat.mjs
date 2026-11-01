@@ -10,6 +10,7 @@
  */
 
 const API_URL = 'https://api.anthropic.com/v1/messages';
+const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
 const MAX_TOOL_ROUNDS = 5;
 const MAX_HISTORY = 24; // messages sent per request (the browser keeps the conversation)
 
@@ -50,7 +51,14 @@ function systemPrompt({ voice }) {
 }
 
 export class DaxChat {
-  constructor({ apiKey = process.env.ANTHROPIC_API_KEY || '', model = process.env.DAX_MODEL || 'claude-sonnet-5-5', fetchImpl = (...a) => fetch(...a), tools = {}, basicAnswer = null, now = () => Date.now() } = {}) {
+  constructor({
+    apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.ANTHROPIC_API_KEY || '',
+    model = process.env.DAX_MODEL || (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY ? 'gemini-2.5-flash' : 'claude-sonnet-5-5'),
+    fetchImpl = (...a) => fetch(...a),
+    tools = {},
+    basicAnswer = null,
+    now = () => Date.now(),
+  } = {}) {
     this.apiKey = String(apiKey || '').trim();
     this.model = model;
     this.fetch = fetchImpl;
@@ -65,8 +73,29 @@ export class DaxChat {
     return Boolean(this.apiKey);
   }
 
+  get provider() {
+    if (String(this.apiKey || '').startsWith('AIza')) return 'gemini';
+    if (String(this.apiKey || '').startsWith('sk-ant-')) return 'anthropic';
+    if (String(this.model || '').startsWith('gemini-')) return 'gemini';
+    return 'anthropic';
+  }
+
+  get activeModel() {
+    if (this.provider === 'gemini') {
+      return String(this.model || '').startsWith('gemini-') ? this.model : 'gemini-2.5-flash';
+    }
+    return String(this.model || '').startsWith('claude-') ? this.model : 'claude-sonnet-5-5';
+  }
+
   status() {
-    return { ai: this.aiEnabled, model: this.aiEnabled ? this.model : null, requests: this.stats.requests, lastError: this.stats.lastError, lastErrorAt: this.stats.lastErrorAt };
+    return {
+      ai: this.aiEnabled,
+      provider: this.aiEnabled ? this.provider : null,
+      model: this.aiEnabled ? this.activeModel : null,
+      requests: this.stats.requests,
+      lastError: this.stats.lastError,
+      lastErrorAt: this.stats.lastErrorAt,
+    };
   }
 
   /** At most 20 questions a minute (protects the API bill if something loops). */
@@ -106,8 +135,12 @@ export class DaxChat {
     this.stats.requests += 1;
 
     if (!this.aiEnabled) {
-      const text = this.basicAnswer ? await this.basicAnswer(question, { voice }) : 'Dax needs an ANTHROPIC_API_KEY to chat.';
+      const text = this.basicAnswer ? await this.basicAnswer(question, { voice }) : 'Dax needs a GEMINI_API_KEY or ANTHROPIC_API_KEY to chat.';
       return { ok: true, text, mode: 'basic', toolsUsed: [] };
+    }
+
+    if (this.provider === 'gemini') {
+      return this.replyGemini(clean, { voice });
     }
 
     const messages = clean.slice();
@@ -134,16 +167,137 @@ export class DaxChat {
         continue;
       }
       const text = blocks.filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
-      return { ok: true, text: text || '(no answer)', mode: 'ai', toolsUsed };
+      return { ok: true, text: text || '(no answer)', mode: 'ai', provider: 'anthropic', toolsUsed };
     }
     return { ok: false, error: 'Dax looked at too many things at once — ask a narrower question.' };
   }
 
-  async call({ messages, voice, allowTools }) {
+  async replyGemini(clean, { voice = false } = {}) {
+    const contents = clean.map((m) => ({
+      role: m.role === 'assistant' ? 'model' : 'user',
+      parts: [{ text: m.content }],
+    }));
+    const toolsUsed = [];
+    for (let round = 0; round <= MAX_TOOL_ROUNDS; round++) {
+      let res;
+      try {
+        res = await this.callGemini({ contents, voice, allowTools: round < MAX_TOOL_ROUNDS });
+      } catch (err) {
+        this.stats.lastError = String(err.message || err).slice(0, 200);
+        this.stats.lastErrorAt = this.now();
+        return { ok: false, error: `Dax could not reach Gemini: ${this.stats.lastError}` };
+      }
+      const candidate = res?.candidates?.[0];
+      const parts = Array.isArray(candidate?.content?.parts) ? candidate.content.parts : [];
+      const fnCalls = parts.filter((p) => p && p.functionCall && p.functionCall.name);
+      if (fnCalls.length) {
+        contents.push({ role: 'model', parts });
+        const responseParts = [];
+        for (const p of fnCalls) {
+          const { name, args } = p.functionCall;
+          toolsUsed.push(name);
+          const raw = await this.runTool(name, args || {});
+          let responseObj;
+          try {
+            const parsed = JSON.parse(raw);
+            responseObj = typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed) ? parsed : { result: parsed };
+          } catch {
+            responseObj = { result: raw };
+          }
+          responseParts.push({
+            functionResponse: {
+              name,
+              response: responseObj,
+            },
+          });
+        }
+        contents.push({ role: 'user', parts: responseParts });
+        continue;
+      }
+      const text = parts
+        .filter((p) => typeof p?.text === 'string' && !p.thought)
+        .map((p) => p.text)
+        .join('\n')
+        .trim();
+      return { ok: true, text: text || '(no answer)', mode: 'ai', provider: 'gemini', toolsUsed };
+    }
+    return { ok: false, error: 'Dax looked at too many things at once — ask a narrower question.' };
+  }
+
+  async callGemini({ contents, voice, allowTools }) {
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), 90_000);
     try {
-      const body = { model: this.model, max_tokens: voice ? 400 : 1500, system: systemPrompt({ voice }), messages };
+      const model = this.activeModel;
+      const body = {
+        systemInstruction: { parts: [{ text: systemPrompt({ voice }) }] },
+        contents,
+        generationConfig: {
+          maxOutputTokens: voice ? 400 : 2048,
+          temperature: 0.2,
+        },
+      };
+      if (allowTools) {
+        body.tools = [
+          {
+            functionDeclarations: TOOLS.map((tool) => ({
+              name: tool.name,
+              description: tool.description,
+              parameters: tool.input_schema,
+            })),
+          },
+        ];
+      }
+      const url = `${GEMINI_BASE_URL}/${encodeURIComponent(model)}:generateContent`;
+      const r = await this.fetch(url, {
+        method: 'POST',
+        headers: {
+          'x-goog-api-key': this.apiKey,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify(body),
+        signal: ctrl.signal,
+      });
+      const text = await r.text();
+      let json = null;
+      try {
+        json = JSON.parse(text);
+      } catch {
+        // not JSON
+      }
+      if (!r.ok) throw new Error(json?.error?.message ? `${r.status}: ${json.error.message}` : `HTTP ${r.status}`);
+      if (json?.usageMetadata) {
+        this.stats.inputTokens += Number(json.usageMetadata.promptTokenCount) || 0;
+        this.stats.outputTokens += Number(json.usageMetadata.candidatesTokenCount) || 0;
+      }
+      return json;
+    } catch (err) {
+      if (err.name === 'AbortError') throw new Error('timed out');
+      throw err;
+    } finally {
+      clearTimeout(t);
+    }
+  }
+
+  async call({ messages, voice, allowTools }) {
+    if (this.provider === 'gemini') {
+      const contents = (messages || []).map((m) => ({
+        role: m.role === 'assistant' ? 'model' : 'user',
+        parts: [{ text: typeof m.content === 'string' ? m.content : JSON.stringify(m.content) }],
+      }));
+      const json = await this.callGemini({ contents, voice, allowTools });
+      const parts = json?.candidates?.[0]?.content?.parts || [];
+      const text = parts
+        .filter((p) => typeof p?.text === 'string' && !p.thought)
+        .map((p) => p.text)
+        .join('\n')
+        .trim();
+      return { ...json, content: [{ type: 'text', text }] };
+    }
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 90_000);
+    try {
+      const body = { model: this.activeModel, max_tokens: voice ? 400 : 1500, system: systemPrompt({ voice }), messages };
       if (allowTools) body.tools = TOOLS;
       const r = await this.fetch(API_URL, {
         method: 'POST',

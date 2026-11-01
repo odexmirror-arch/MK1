@@ -31,7 +31,7 @@ function connectSseStream() {
     try {
       const payload = JSON.parse(evt.data);
       if (handleLiveSse(payload)) return;
-      if (payload.event === 'position_sold' || payload.event === 'records_pruned' || payload.event === 'state_reset' || payload.event === 'history_cleared') pnlSummary.at = 0; // refetch totals
+      if (payload.event === 'position_sold' || payload.event === 'records_pruned' || payload.event === 'state_reset' || payload.event === 'history_cleared' || payload.event === 'follow_added' || payload.event === 'follow_removed' || payload.event === 'follows_updated') pnlSummary.at = 0; // refetch totals
       // real trade closed/opened: the bot wallet balance changed on-chain — show it right away
       if (payload.event === 'bot_balance' && payload.data) {
         window.__botStatus = { ...(window.__botStatus || {}), balance: payload.data };
@@ -564,9 +564,12 @@ window.applyDateFilter = function applyDateFilter() {
   const labelText = formatDateRangeLabel(dateFilterState.preset, dateFilterState.startDate, dateFilterState.endDate);
   const btnLabel = document.getElementById('date-filter-label');
   if (btnLabel) btnLabel.textContent = labelText;
+  const followsBtnLabel = document.getElementById('follows-date-filter-label');
+  if (followsBtnLabel) followsBtnLabel.textContent = labelText;
 
   closeModal('modal-date-filter');
   renderKpiStrip();
+  renderFollowsList();
   renderClosedPositions();
   renderHistoryTable();
   renderLiveSignals();
@@ -1189,6 +1192,7 @@ async function refreshPnlSummary() {
       if (engineState) {
         renderKpiStrip();
         renderClosedPositions();
+        renderFollowsList();
       }
     }
   } catch {
@@ -1535,21 +1539,65 @@ function fmtHold(sec) {
   return `${Math.floor(sec / 3600)}h ${Math.floor((sec % 3600) / 60)}m`;
 }
 
+/** Filtered scorecard for a trader wallet in the active date range (All time uses the live scorecard). */
+function traderScoreForFilter(f) {
+  if (!f || !engineState) return null;
+  if (dateFilterState.preset === 'all') {
+    return engineState.traderScores?.[f.id] || null;
+  }
+  const S = currentPnlSummary();
+  if (S?.traderScores?.[f.id]) return S.traderScores[f.id];
+  // Synchronous fallback while /api/pnl/summary is loading so the UI never flickers
+  const paper = Boolean(engineState.settings?.paperTrading);
+  const closed = (engineState.closedPositions || [])
+    .filter((c) => (c.followId === f.id || (f.traderWallet && c.traderWallet === f.traderWallet)) && Boolean(c.isPaper) === paper && inDateFilter(c.closedAt || c.openedAt))
+    .sort((a, b) => (a.closedAt || a.openedAt || 0) - (b.closedAt || b.openedAt || 0));
+  const pnls = closed.map((c) => Number(c.pnlUsd)).filter(Number.isFinite);
+  const wins = pnls.filter((p) => p > 0).length;
+  const losses = pnls.filter((p) => p < 0).length;
+  let losingStreak = 0;
+  for (let i = pnls.length - 1; i >= 0; i--) {
+    if (pnls[i] < 0) losingStreak += 1;
+    else if (pnls[i] > 0) break;
+  }
+  const held = closed
+    .map((c) => (c.closedAt && c.openedAt ? Math.max(0, Math.round((c.closedAt - c.openedAt) / 1000)) : null))
+    .filter(Number.isFinite);
+  const avg = (a) => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : null);
+  return {
+    followId: f.id,
+    paper,
+    trades: closed.length,
+    wins,
+    losses,
+    losingStreak,
+    winRatePct: wins + losses > 0 ? Number(((wins / (wins + losses)) * 100).toFixed(1)) : null,
+    pnlUsd: Number(pnls.reduce((a, b) => a + b, 0).toFixed(2)),
+    avgHoldSec: held.length ? Math.round(avg(held)) : null,
+    avgEntrySlipPct: null,
+    avgExitSlipPct: null,
+    roundTripSlipPct: null,
+    avgLagSec: null,
+    measuredSlip: 0,
+    measuredExits: 0,
+  };
+}
+
 /** Scorecard strip on a trader card: real results of the copies and how far they slip behind. */
 function traderScoreHtml(f) {
-  const all = engineState.traderScores?.[f.id];
-  if (!all) return '';
+  const sc = traderScoreForFilter(f);
+  if (!sc) return '';
   const cfg = { autoPause: true, minTrades: 10, maxSlipPct: 20, maxLagSec: 10, ...(engineState.settings.scorecard || {}) };
-  const sc = all.sinceResume && f.scoreSince ? all.sinceResume : all;
   const pct = (v, signed = true) => (v === null || v === undefined ? '—' : `${signed && v > 0 ? '+' : ''}${Number(v).toFixed(1)}%`);
   const slipBad = sc.roundTripSlipPct !== null && sc.roundTripSlipPct > cfg.maxSlipPct;
   const lagBad = sc.avgLagSec !== null && sc.avgLagSec > cfg.maxLagSec;
   const pnlCls = sc.pnlUsd > 0 ? 'pos-up' : sc.pnlUsd < 0 ? 'pos-down' : '';
   const judged = sc.trades >= cfg.minTrades;
+  const periodLabel = dateFilterText();
   const verdict = f.pauseReason === 'slow'
     ? `<span class="score-verdict is-bad">Paused: ${esc(f.pauseDetail || "the bot can't keep up")}</span>`
     : !sc.trades
-      ? '<span class="score-verdict">No closed copies yet</span>'
+      ? `<span class="score-verdict">No closed copies ${dateFilterState.preset === 'all' ? 'yet' : dateFilterPhrase()}</span>`
       : !judged
         ? `<span class="score-verdict">${sc.trades}/${cfg.minTrades} copies before ${cfg.autoPause ? 'auto-pause can judge' : 'the score is reliable'}</span>`
         : slipBad || lagBad
@@ -1557,13 +1605,13 @@ function traderScoreHtml(f) {
           : '<span class="score-verdict is-good">Keeping up</span>';
   return `
           <div class="trader-score">
-            <div class="score-head"><span>Copy scorecard${all.sinceResume && f.scoreSince ? ' · since resume' : ''} · ${engineState.settings.paperTrading ? 'paper' : 'real'}</span>${verdict}</div>
+            <div class="score-head"><span>Copy scorecard · ${esc(periodLabel)} · ${engineState.settings.paperTrading ? 'paper' : 'real'}</span>${verdict}</div>
             <div class="score-grid">
               <div class="score-item"><span>Win rate</span><strong class="mono">${sc.winRatePct === null ? '—' : `${sc.winRatePct.toFixed(0)}%`}</strong><em>${sc.wins}W · ${sc.losses}L</em></div>
-              <div class="score-item"><span>Copy PnL</span><strong class="mono ${pnlCls}">${sc.trades ? `${sc.pnlUsd >= 0 ? '+' : '−'}$${Math.abs(sc.pnlUsd).toFixed(2)}` : '—'}</strong><em>${sc.trades} trades</em></div>
+              <div class="score-item"><span>Copy PnL</span><strong class="mono ${pnlCls}">${sc.trades ? `${sc.pnlUsd >= 0 ? '+' : '−'}$${Math.abs(sc.pnlUsd).toFixed(2)}` : '—'}</strong><em>${sc.trades} trade${sc.trades === 1 ? '' : 's'}</em></div>
               <div class="score-item"><span>Avg hold</span><strong class="mono">${fmtHold(sc.avgHoldSec)}</strong><em>per trade</em></div>
               <div class="score-item" title="How much higher our copies bought than the trader did"><span>Entry slip</span><strong class="mono">${pct(sc.avgEntrySlipPct)}</strong><em>vs trader buy</em></div>
-              <div class="score-item" title="Mirror sells: our sell price vs the trader's (negative = we sold lower)"><span>Exit slip</span><strong class="mono">${pct(sc.avgExitSlipPct)}</strong><em>${sc.measuredExits ? `${sc.measuredExits} mirror sells` : 'no mirror sells'}</em></div>
+              <div class="score-item" title="Mirror sells: our sell price vs the trader's (negative = we sold lower)"><span>Exit slip</span><strong class="mono">${pct(sc.avgExitSlipPct)}</strong><em>${sc.measuredExits ? `${sc.measuredExits} mirror sell${sc.measuredExits === 1 ? '' : 's'}` : 'no mirror sells'}</em></div>
               <div class="score-item ${slipBad ? 'is-bad' : ''}" title="Entry slip minus exit slip: what copying this trader costs per trade"><span>Total slip</span><strong class="mono">${pct(sc.roundTripSlipPct)}</strong><em>limit ${cfg.maxSlipPct}%</em></div>
               <div class="score-item ${lagBad ? 'is-bad' : ''}" title="Seconds between the trader's trade landing and our copy"><span>Detect delay</span><strong class="mono">${sc.avgLagSec === null ? '—' : `${sc.avgLagSec.toFixed(1)}s`}</strong><em>limit ${cfg.maxLagSec}s</em></div>
             </div>
@@ -1579,6 +1627,11 @@ function trendCircle(v) {
 }
 
 function renderFollowsList() {
+  const followsDateLabel = document.getElementById('follows-date-filter-label');
+  if (followsDateLabel) followsDateLabel.textContent = dateFilterText();
+  const mainDateLabel = document.getElementById('date-filter-label');
+  if (mainDateLabel) mainDateLabel.textContent = dateFilterText();
+
   const container = document.getElementById('follows-list');
   if (!container) return;
 
@@ -1606,16 +1659,18 @@ function renderFollowsList() {
             : `1:1 proportional (cap $${f.sizing.amount})`;
       const tpslText = `${f.tpPct ? `TP +${f.tpPct}%` : 'No TP'} · ${f.slPct ? `SL −${f.slPct}%` : 'No SL'}`;
       const activeExitCount = Object.values(f.exitRules || {}).filter((r) => r && r.enabled).length;
-      const openCount = engineState.positions.filter((p) => p.followId === f.id && p.remainingTokens > 0).length;
-      const histCount = engineState.history.filter((h) => h.followId === f.id || traderWalletOf(h) === f.traderWallet).length;
-      const sigCount = (liveWatch?.signals || []).filter((x) => x.wallet === f.traderWallet && !x.backfill).length;
+      const openCount = engineState.positions.filter((p) => p.followId === f.id && p.remainingTokens > 0 && (dateFilterState.preset === 'all' || inDateFilter(p.openedAt))).length;
+      const histCount = engineState.history.filter((h) => (h.followId === f.id || traderWalletOf(h) === f.traderWallet) && inDateFilter(h.timestamp)).length;
+      const sigCount = (liveWatch?.signals || []).filter((x) => x.wallet === f.traderWallet && !x.backfill && inDateFilter(x.blockTime || x.detectedAt)).length;
+      const sc = traderScoreForFilter(f);
+      const streakVal = dateFilterState.preset === 'all' ? (f.consecutiveLosses || 0) : (sc?.losingStreak ?? 0);
       const slow = f.pauseReason === 'slow';
 
       return `
         <div class="follow-card ${isCopying ? '' : 'is-paused'}" data-follow="${f.id}">
           <div class="follow-head">
             <div class="follow-identity">
-              ${walletAvatar(f.traderWallet, f.name || f.handle, 40)}
+              ${walletAvatar(f.traderWallet, f.name || f.handle, 44)}
               <div>
                 <div class="follow-name-row">
                   <strong class="follow-name">${esc(f.name)}</strong>
@@ -1638,7 +1693,7 @@ function renderFollowsList() {
             <div class="meta-item"><span>Sizing</span><strong class="mono">${sizeText}</strong></div>
             <div class="meta-item"><span>TP / SL</span><strong class="mono">${tpslText}</strong></div>
             <div class="meta-item"><span>Limits</span><strong class="mono">${[f.minTradeUsd != null ? `Min $${f.minTradeUsd}` : '', f.maxOpenPositions != null ? `${f.maxOpenPositions} open max` : '', f.maxAtRiskUsd != null ? `$${Number(f.maxAtRiskUsd).toLocaleString()} at risk` : ''].filter(Boolean).join(' · ') || 'None set'}</strong></div>
-            <div class="meta-item"><span>Losing streak</span><strong class="mono ${(f.consecutiveLosses || 0) > 0 ? 'pos-down' : ''}">${f.consecutiveLosses || 0}</strong></div>
+            <div class="meta-item"><span>Losing streak</span><strong class="mono ${streakVal > 0 ? 'pos-down' : ''}">${streakVal}</strong></div>
           </div>
           ${traderScoreHtml(f)}
           ${f.mode === 'auto-exit' && activeExitCount === 0 ? `<div class="follow-warn">
@@ -3662,16 +3717,18 @@ function activeTermTab() {
   return currentTermTab || 'positions';
 }
 
-const SIDEBAR_PANELS = ['wallets', 'history', 'config'];
+const SIDEBAR_PANELS = ['follows', 'wallets', 'history', 'config'];
 
 function syncSideSubnav() {
   const onTerminal = document.getElementById('view-terminal')?.classList.contains('active');
   const tab = activeTermTab();
-  // Sidebar: Wallets / History light up for their panel; Web Terminal for every other panel
+  // Sidebar: Copytrades / Wallets / History / Settings light up for their panel; Home for every other panel
   document.querySelectorAll('.side-nav .nav-tab').forEach((b) => {
     const panel = b.getAttribute('data-panel');
     const view = b.getAttribute('data-view');
-    if (panel) b.classList.toggle('active', Boolean(onTerminal && tab === panel));
+    if (panel === 'follows') b.classList.toggle('active', Boolean(onTerminal && tab === 'config' && currentCfgSection === 'copytrades'));
+    else if (panel === 'config') b.classList.toggle('active', Boolean(onTerminal && tab === 'config' && currentCfgSection !== 'copytrades'));
+    else if (panel) b.classList.toggle('active', Boolean(onTerminal && tab === panel));
     else if (view === 'terminal') b.classList.toggle('active', Boolean(onTerminal && !SIDEBAR_PANELS.includes(tab)));
   });
   document.querySelectorAll('.nav-sub').forEach((b) => {
@@ -3681,7 +3738,10 @@ function syncSideSubnav() {
 }
 
 window.goTerminalTab = function goTerminalTab(tab) {
-  if (tab === 'config') setTimeout(() => window.refreshRealPanel?.(), 0);
+  if (tab === 'config') {
+    setTimeout(() => window.refreshRealPanel?.(), 0);
+    if (!routeApplying && currentCfgSection === 'copytrades') setTimeout(() => openSettingsSection('profile'), 0);
+  }
   // one address change per click: the view switch below must not record its own step
   const wasApplying = typeof routeApplying !== 'undefined' && routeApplying;
   if (typeof routeApplying !== 'undefined') routeApplying = true;
@@ -4207,6 +4267,7 @@ window.openSettingsSection = function openSettingsSection(key) {
   currentCfgSection = key;
   document.querySelectorAll('.cfg-section').forEach((el) => el.classList.toggle('active', el.dataset.cfg === key));
   document.querySelectorAll('.cfg-nav-btn').forEach((el) => el.classList.toggle('active', el.dataset.cfg === key));
+  syncSideSubnav();
   try {
     localStorage.setItem('odex.cfgSection', key);
   } catch {
@@ -6010,10 +6071,10 @@ function renderDaxAi() {
   const pill = document.getElementById('intg-dax-pill');
   if (pill) {
     pill.className = `intg-pill${c.configured ? (c.lastError ? ' is-bad' : ' is-on') : ''}`;
-    pill.textContent = c.configured ? (c.lastError ? 'Error' : 'Full AI') : 'Basic mode';
+    pill.textContent = c.configured ? (c.lastError ? 'Error' : c.provider === 'gemini' ? 'Gemini AI' : 'Full AI') : 'Basic mode';
   }
   const key = document.getElementById('intg-dax-key');
-  if (key && !key.value) key.placeholder = c.keyMasked ? `Saved: ${c.keyMasked}` : c.source === 'railway' ? 'Using ANTHROPIC_API_KEY from Railway' : 'sk-ant-…';
+  if (key && !key.value) key.placeholder = c.keyMasked ? `Saved: ${c.keyMasked}` : c.source === 'railway' ? 'Using API key from environment' : 'AIza… (Gemini) or sk-ant-… (Claude)';
   const model = document.getElementById('intg-dax-model');
   if (model && c.model && document.activeElement !== model) model.value = c.model;
   const usage = document.getElementById('intg-dax-usage');
@@ -6036,16 +6097,17 @@ async function daxAiPost(sub, body) {
   const data = await res.json().catch(() => ({ ok: false, error: `server answered ${res.status}` }));
   if (data.dax) intgState = { ...(intgState || {}), dax: data.dax };
   renderDaxAi();
+  loadDaxChatStatus();
   return data;
 }
 window.daxAiSave = async function daxAiSave() {
   const el = document.getElementById('intg-dax-key');
   const apiKey = el.value.trim();
-  if (!apiKey) return daxAiMsg('Paste your Claude API key first.', 'bad');
+  if (!apiKey) return daxAiMsg('Paste your Gemini (AIza…) or Claude (sk-ant-…) API key first.', 'bad');
   const d = await daxAiPost('', { apiKey });
   if (!d.ok) return daxAiMsg(d.error, 'bad');
   el.value = '';
-  daxAiMsg('Saved — Dax is now a full AI. Press Test to check the key.', 'good');
+  daxAiMsg(`Saved — Dax is now powered by ${d.dax?.provider === 'gemini' ? 'Google Gemini AI' : 'Claude AI'}. Press Test to check the key.`, 'good');
 };
 window.daxAiModel = async function daxAiModel(model) {
   const d = await daxAiPost('', { model });
@@ -6054,11 +6116,12 @@ window.daxAiModel = async function daxAiModel(model) {
 window.daxAiTest = async function daxAiTest() {
   daxAiMsg('Testing the key…');
   const d = await daxAiPost('test');
-  daxAiMsg(d.ok ? `Key works — Claude answered "${d.reply || 'OK'}".` : `Test failed: ${d.error}`, d.ok ? 'good' : 'bad');
+  const who = d.dax?.provider === 'gemini' ? 'Gemini' : 'Claude';
+  daxAiMsg(d.ok ? `Key works — ${who} answered "${d.reply || 'OK'}".` : `Test failed: ${d.error}`, d.ok ? 'good' : 'bad');
 };
 window.daxAiDisconnect = async function daxAiDisconnect() {
   const d = await daxAiPost('disconnect');
-  daxAiMsg(d.ok ? (d.dax?.configured ? 'Removed — Dax now uses ANTHROPIC_API_KEY from Railway.' : 'Key removed — Dax is back in basic mode.') : d.error, d.ok ? '' : 'bad');
+  daxAiMsg(d.ok ? (d.dax?.configured ? 'Removed — Dax now uses the environment API key.' : 'Key removed — Dax is back in basic mode.') : d.error, d.ok ? '' : 'bad');
 };
 
 function renderIntegrations() {
@@ -6438,6 +6501,16 @@ function saveDaxChat() {
 const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition || null;
 const voiceSupported = Boolean(SpeechRec && window.speechSynthesis);
 
+window.openDaxAiSettings = function openDaxAiSettings() {
+  goTerminalTab('config');
+  openSettingsSection('integrations');
+  setTimeout(() => {
+    const card = document.querySelector('.intg-card[data-app="dax"]');
+    card?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    document.getElementById('intg-dax-key')?.focus();
+  }, 80);
+};
+
 async function loadDaxChatStatus() {
   try {
     daxc.status = await (await fetch('/api/dax/chat/status', { cache: 'no-store' })).json();
@@ -6446,8 +6519,14 @@ async function loadDaxChatStatus() {
   }
   const st = document.getElementById('dc-status');
   if (st) {
-    st.textContent = daxc.status?.ai ? 'Online · reads all your trades' : 'Online · answers from your Odex records';
-    st.title = daxc.status?.ai ? '' : 'Add ANTHROPIC_API_KEY (Railway variables or your .env) for full chat';
+    if (daxc.status?.ai) {
+      const prov = daxc.status.provider === 'gemini' ? 'Gemini AI' : 'Claude AI';
+      st.textContent = `Online · ${prov} smart agent`;
+      st.title = `Model: ${daxc.status.model || ''}`;
+    } else {
+      st.innerHTML = `Online · answers from your Odex records · <button type="button" onclick="openDaxAiSettings()" style="background:none;border:none;color:#818cf8;padding:0;font-size:inherit;font-weight:600;cursor:pointer;text-decoration:underline;">Connect Gemini AI</button>`;
+      st.title = 'Connect a Gemini API key in Settings → Integrations for full smart agent reasoning';
+    }
   }
   document.getElementById('dax-fab')?.classList.toggle('is-basic', !daxc.status?.ai);
 }

@@ -396,24 +396,34 @@ engine.onUpdate((evt) => {
 setInterval(() => runRentReclaim({ why: 'every 30 min' }).catch(() => {}), 30 * 60_000).unref?.();
 setTimeout(() => runRentReclaim({ why: 'start' }).catch(() => {}), 90_000).unref?.();
 
-// Dax chat (text / voice): Claude with READ-ONLY tools over the bot's records (needs ANTHROPIC_API_KEY)
+// Dax chat (text / voice): Gemini / Claude with READ-ONLY tools over the bot's records
 const daxAge = (t) => (t ? Math.round((Date.now() - t) / 1000) : null);
-// Dax agent API key: set in Settings → Integrations (kept in settings on the server), or ANTHROPIC_API_KEY
-const DAX_MODELS = ['claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-opus-5-5'];
+// Dax agent API key: set in Settings → Integrations (kept in settings on the server), or GEMINI_API_KEY / ANTHROPIC_API_KEY
+const DAX_MODELS = ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.0-flash', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-opus-5-5'];
+function envDaxKey() {
+  return String(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.ANTHROPIC_API_KEY || '').trim();
+}
 function applyDaxAi() {
   const s = engine.settings.daxAi || {};
-  daxChat.apiKey = String(s.apiKey || process.env.ANTHROPIC_API_KEY || '').trim();
-  daxChat.model = s.model || process.env.DAX_MODEL || DAX_MODELS[0];
+  const key = String(s.apiKey || envDaxKey()).trim();
+  daxChat.apiKey = key;
+  const wantGemini = key.startsWith('AIza') || (!key.startsWith('sk-ant-') && !String(s.model || '').startsWith('claude-'));
+  const defModel = wantGemini ? 'gemini-2.5-flash' : 'claude-sonnet-5-5';
+  daxChat.model = s.model || process.env.DAX_MODEL || defModel;
 }
 function daxAiPublic() {
   const s = engine.settings.daxAi || {};
   const key = String(s.apiKey || '').trim();
-  const fromEnv = !key && Boolean(String(process.env.ANTHROPIC_API_KEY || '').trim());
+  const envKey = envDaxKey();
+  const fromEnv = !key && Boolean(envKey);
+  const activeKey = key || envKey;
+  const isGemini = activeKey ? activeKey.startsWith('AIza') : String(daxChat?.model || s.model || 'gemini-2.5-flash').startsWith('gemini-');
   return {
     configured: Boolean(key) || fromEnv,
+    provider: isGemini ? 'gemini' : 'anthropic',
     source: key ? 'dashboard' : fromEnv ? 'railway' : null,
-    keyMasked: key ? `sk-ant-…${key.slice(-4)}` : null,
-    model: daxChat?.model || s.model || DAX_MODELS[0],
+    keyMasked: key ? `${key.startsWith('AIza') ? 'AIza' : 'sk-ant-'}…${key.slice(-4)}` : null,
+    model: daxChat?.activeModel || s.model || DAX_MODELS[0],
     models: DAX_MODELS,
     requests: daxChat?.stats?.requests || 0,
     lastError: daxChat?.stats?.lastError ? redact(daxChat.stats.lastError, daxChat.apiKey) : null,
@@ -469,9 +479,29 @@ export const daxChat = new DaxChat({
     },
     get_settings: () => {
       const rt = realTrader.status();
+      const todayStart = new Date().setHours(0, 0, 0, 0);
       return {
         mode: engine.settings.paperTrading ? 'paper' : 'real SOL',
-        traders: engine.follows.map((f) => ({ name: f.handle, wallet: f.traderWallet, status: f.status, pauseReason: f.pauseDetail || null, mode: f.mode, sellsWhenTraderSells: Boolean(f.mirrorSells), size: f.sizing, stopLossPct: f.slPct ?? null, takeProfitPct: f.tpPct ?? null, maxChasePct: f.maxChasePct ?? engine.settings.maxChasePct ?? null, copyTopUps: f.copyTopUps ?? null, realSolPerDay: f.maxRealSolPerDay ?? null, skipReentriesForMin: f.reentryCooldownMin ?? null, exitRules: f.exitRules })),
+        swapRoute: realTrader.routeSetting(),
+        fastDetect: Boolean(liveSignals.watcher.fastDetect?.()),
+        traders: engine.follows.map((f) => ({
+          name: f.handle,
+          wallet: f.traderWallet,
+          status: f.status,
+          pauseReason: f.pauseDetail || null,
+          mode: f.mode,
+          sellsWhenTraderSells: Boolean(f.mirrorSells),
+          size: f.sizing,
+          stopLossPct: f.slPct ?? null,
+          takeProfitPct: f.tpPct ?? null,
+          maxChasePct: f.maxChasePct ?? engine.settings.maxChasePct ?? null,
+          copyTopUps: f.copyTopUps ?? null,
+          realSolPerDay: f.maxRealSolPerDay ?? null,
+          skipReentriesForMin: f.reentryCooldownMin ?? null,
+          exitRules: f.exitRules,
+          scorecardAllTime: engine.traderScorecard(f.id),
+          scorecardToday: engine.traderScorecard(f.id, { from: todayStart }),
+        })),
         realTrading: rt.configured ? { wallet: rt.address, balanceSol: rt.balance?.sol ?? null, perBuySol: rt.caps?.maxSolPerTrade, perDaySol: rt.caps?.maxSolPerDay, usedLast24hSol: rt.spent24hSol, keptForFeesSol: rt.caps?.reserveSol } : 'bot wallet not set up',
       };
     },
@@ -1005,8 +1035,14 @@ export const server = http.createServer(async (req, res) => {
         } else if (!sub) {
           if (body.apiKey !== undefined && String(body.apiKey).trim()) {
             const k = String(body.apiKey).trim();
-            if (!/^sk-ant-[A-Za-z0-9_-]{20,}$/.test(k)) throw new Error('that does not look like a Claude API key (it starts with sk-ant-)');
+            const isGeminiKey = /^AIza[A-Za-z0-9_-]{20,}$/.test(k);
+            const isClaudeKey = /^sk-ant-[A-Za-z0-9_-]{20,}$/.test(k);
+            if (!isGeminiKey && !isClaudeKey) {
+              throw new Error('that does not look like a Gemini API key (starts with AIza) or Claude API key (starts with sk-ant-)');
+            }
             cur.apiKey = k;
+            if (isGeminiKey && (!cur.model || String(cur.model).startsWith('claude-'))) cur.model = 'gemini-2.5-flash';
+            if (isClaudeKey && (!cur.model || String(cur.model).startsWith('gemini-'))) cur.model = 'claude-sonnet-5-5';
             cur.savedAt = Date.now();
           }
           if (body.model !== undefined) cur.model = DAX_MODELS.includes(body.model) ? body.model : DAX_MODELS[0];

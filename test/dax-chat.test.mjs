@@ -167,3 +167,52 @@ test('DC-S3 voice answers are short plain sentences; no-data cases say so', () =
   ctx.openPositions = () => [];
   assert.match(smartDaxAnswer('open positions', ctx), /No open positions/);
 });
+
+test('DC-G1 Gemini API smart agent: functionCalling round-trip with read-only tools', async () => {
+  const GEMINI_KEY = 'AIzaSyTestGeminiKey12345678901234567890';
+  const { calls, fetchImpl } = mockApi([
+    {
+      json: {
+        candidates: [
+          {
+            content: {
+              role: 'model',
+              parts: [{ functionCall: { name: 'get_report', args: { period: 'today' } } }],
+            },
+          },
+        ],
+        usageMetadata: { promptTokenCount: 120, candidatesTokenCount: 15 },
+      },
+    },
+    {
+      json: {
+        candidates: [
+          {
+            content: {
+              role: 'model',
+              parts: [{ text: 'Decu made 1 paper trade today on Superman (−$3.30).' }],
+            },
+          },
+        ],
+        usageMetadata: { promptTokenCount: 250, candidatesTokenCount: 25 },
+      },
+    },
+  ]);
+  const dax = new DaxChat({
+    apiKey: GEMINI_KEY,
+    model: 'gemini-2.5-flash',
+    fetchImpl,
+    tools: { get_report: ({ period }) => `# Report (${period})\n- Superman −$3.30` },
+  });
+  assert.equal(dax.provider, 'gemini');
+  assert.equal(dax.activeModel, 'gemini-2.5-flash');
+  const r = await dax.reply([{ role: 'user', text: 'how did Decu do today?' }]);
+  assert.equal(r.ok, true);
+  assert.equal(r.mode, 'ai');
+  assert.equal(r.provider, 'gemini');
+  assert.deepEqual(r.toolsUsed, ['get_report']);
+  assert.match(r.text, /Superman/);
+  assert.equal(calls[0].url, 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent');
+  assert.equal(calls[0].headers['x-goog-api-key'], GEMINI_KEY);
+  assert.equal(calls[1].body.contents[2].parts[0].functionResponse.name, 'get_report');
+});

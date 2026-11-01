@@ -5170,6 +5170,20 @@ body { padding-bottom: 40px; }
   border-color: transparent !important;
   box-shadow: none !important;
 }
+#term-follows .follow-name-row .status-pill,
+#term-follows .follow-name-row .chain-badge {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  padding-left: 2px !important;
+  padding-right: 2px !important;
+}
+#term-follows .follow-identity .w-avatar {
+  width: 44px !important;
+  height: 44px !important;
+  font-size: 15.5px;
+  border-radius: 13px;
+}
 
 /* trader cards: same faint card as History's table band */
 #term-follows .follow-card {
