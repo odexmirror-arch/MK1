@@ -378,6 +378,7 @@ export class RealTrader {
         const dq = await this.directQuote({ side, token, amountUsd, slippagePct, tokenAmount, px });
         if (dq) return dq;
       } catch (err) {
+        if (err?.skipBuy) throw err;
         this.noteFallback(`quote: ${err.message}`);
       }
     }
@@ -497,6 +498,9 @@ export class RealTrader {
     const curve = PD.decodeCurve(curveAcc.data?.[0]);
     const blocker = PD.directBlocker(curve);
     if (blocker) {
+      if (side === 'buy' && blocker === 'curve is not priced in SOL') {
+        throw Object.assign(new Error('curve is not priced in SOL (token-paired curve skipped)'), { skipBuy: true });
+      }
       this.noteFallback(blocker);
       return null;
     }

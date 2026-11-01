@@ -472,5 +472,21 @@ test('PD19 direct buy blasts fastRpcUrls before awaiting primary sendTransaction
   assert.ok(sleepIntervals.includes(100), `expected 100ms status poll interval, got ${sleepIntervals.join(', ')}`);
 });
 
+test('PD20 non-SOL-paired pump.fun curve skips BUY immediately without falling back to Jupiter, while SELL still falls back to Jupiter', async () => {
+  const otherMint = 'MsGDybWRSNdNXkdDZhEksgzugT5CbVWUG2wkhwgpump';
+  const { trader, w, token } = world({ curve: curveBytes({ quoteMint: otherMint }), heldTokens: 5_000_000_000n });
+  await assert.rejects(
+    trader.quote({ side: 'buy', token, amountUsd: 10, slippagePct: 10 }),
+    (err) => err?.skipBuy === true && /curve is not priced in SOL/i.test(err.message),
+  );
+  assert.equal(w.jupiterOrders, 0, 'buy never falls back to 2-hop Jupiter quote');
+  assert.equal(w.sent.length, 0);
+
+  // Sells on non-SOL-paired curves still fall back to Jupiter so existing holdings can always exit
+  await assert.rejects(trader.quote({ side: 'sell', token, tokenAmount: 'all', slippagePct: 15 }));
+  assert.ok(w.jupiterOrders >= 1, 'sell falls back to Jupiter');
+});
+
+
 
 

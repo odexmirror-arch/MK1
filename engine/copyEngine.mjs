@@ -876,7 +876,8 @@ export class CopyTradingEngine {
       });
     } catch (err) {
       if (!real) throw err;
-      return this.recordSkip({ dryRun, follow, wallet, signal, reason: `real quote failed: ${err.message}` });
+      if (!dryRun && err?.skipBuy) this.markCopiedCycle(follow.id, token.address, 'missed');
+      return this.recordSkip({ dryRun, follow, wallet, signal, reason: err?.skipBuy ? err.message : `real quote failed: ${err.message}` });
     }
 
     const traderFillPrice = Number(token.traderFillPriceUsd || quote.quotedPriceUsd);
