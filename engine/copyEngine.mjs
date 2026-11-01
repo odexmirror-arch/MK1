@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { CHAINS, ChainExecutionAdapter, solanaTradeFeePct } from './chainAdapters.mjs';
-import { pumpCurveCopyFill } from './pumpCurve.mjs';
+import { pumpCurveCopyFill, pumpCurveSellFill } from './pumpCurve.mjs';
 
 /**
  * Default 5-Rule Auto-Exit Engine Suggestions & Ranges (exact mofo.gg specification)
@@ -1152,6 +1152,7 @@ export class CopyTradingEngine {
       sellPct,
       cause: follow.mode === 'auto-exit' ? 'trader sold' : 'Mirror sell',
       traderExitPriceUsd: Number(signal.token?.traderFillPriceUsd) || null,
+      traderSellSol: Number(signal.traderPoolSol > 0 ? signal.traderPoolSol : signal.traderBuyNative) || null,
     });
   }
 
@@ -1199,7 +1200,7 @@ export class CopyTradingEngine {
     }
   }
 
-  async executePositionSellNow(positionId, { sellPct = 100, exactTokens = null, cause = 'manual sell', traderExitPriceUsd = null } = {}) {
+  async executePositionSellNow(positionId, { sellPct = 100, exactTokens = null, cause = 'manual sell', traderExitPriceUsd = null, traderSellSol = null } = {}) {
     const pos = this.positions.find((p) => p.id === positionId);
     if (!pos || pos.remainingTokens <= 0) {
       return { ok: false, error: 'Position not found or already closed.' };
@@ -1261,6 +1262,18 @@ export class CopyTradingEngine {
 
     // a sell you press yourself never waits for an earlier failed sell's retry timer
     const sellPressed = /manual|sell all|panic|initials/i.test(String(cause || ''));
+    let paperSellFillPriceUsd = null;
+    if (pos.isPaper && pos.chainId === 'solana' && (/pump$/i.test(String(pos.tokenAddress || '')) || pos.venue === 'pumpfun') && Number(traderSellSol) > 0) {
+      const solPx = CHAINS.solana.nativePriceUsd;
+      const refPx = Number(traderExitPriceUsd) > 0 ? Number(traderExitPriceUsd) : Number(pos.currentPriceUsd);
+      const sc = pumpCurveSellFill({
+        traderPriceUsd: refPx,
+        traderSol: Number(traderSellSol),
+        ourSol: solPx > 0 ? (tokensSold * refPx) / solPx : 0,
+        solPriceUsd: solPx,
+      });
+      if (sc?.fillPriceUsd > 0) paperSellFillPriceUsd = sc.fillPriceUsd;
+    }
     let quote;
     try {
       quote = await this.adapter.getSwapQuote({
@@ -1272,6 +1285,7 @@ export class CopyTradingEngine {
           currentPriceUsd: pos.currentPriceUsd,
           marketCapUsd: pos.currentMarketCapUsd,
           liquidityUsd: pos.liquidityUsd,
+          paperSellFillPriceUsd,
         },
         amountUsd: grossValueUsd,
         slippagePct: sellSlippagePct,

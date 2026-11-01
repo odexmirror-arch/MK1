@@ -104,3 +104,27 @@ export function pumpCurveCopyFill({ traderPriceUsd, traderSol, ourSol, solPriceU
     fillPriceUsd: ((v1 * (v1 + x)) / k) * px,
   };
 }
+
+/**
+ * Where a copy SELL really fills on a pump.fun bonding curve after the trader's own sell drained
+ * `traderSol` SOL from the pool:
+ *   trader: avg sell price p = V0·V1/k where V0 = V1 + s  →  pool after them V1 = (−s + √(s² + 4kp)) / 2
+ *   after the trader: marginal price V1²/k
+ *   our sell of ~x SOL: avg price V1·max(30, V1−x)/k
+ */
+export function pumpCurveSellFill({ traderPriceUsd, traderSol, ourSol = 0, solPriceUsd }) {
+  const px = Number(solPriceUsd);
+  const p = Number(traderPriceUsd) / px;
+  const s = Number(traderSol);
+  const x = Math.max(0, Number(ourSol) || 0);
+  if (!(px > 0) || !(p > 0) || !(s > 0)) return null;
+  const k = PUMP_CURVE_K;
+  const v1 = (-s + Math.sqrt(s * s + 4 * k * p)) / 2;
+  if (!(v1 >= 29.5 && v1 <= 116)) return null;
+  const v2 = Math.max(30, v1 - x);
+  return {
+    poolSolAfterTrader: v1,
+    postTraderPriceUsd: ((v1 * v1) / k) * px,
+    fillPriceUsd: ((v1 * v2) / k) * px,
+  };
+}

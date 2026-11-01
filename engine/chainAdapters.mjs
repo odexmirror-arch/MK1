@@ -240,6 +240,9 @@ export class ChainExecutionAdapter {
     if (side === 'buy' && Number(token.paperFillPriceUsd) > 0) {
       fillPriceUsd = Number(token.paperFillPriceUsd);
       impactPct = Math.max(0, (fillPriceUsd / currentPriceUsd - 1) * 100);
+    } else if (side === 'sell' && Number(token.paperSellFillPriceUsd) > 0) {
+      fillPriceUsd = Number(token.paperSellFillPriceUsd);
+      impactPct = Math.max(0, (1 - fillPriceUsd / currentPriceUsd) * 100);
     }
 
     return {
@@ -261,16 +264,32 @@ export class ChainExecutionAdapter {
       return this.liveHooks.executeSwap(args);
     }
 
+    const delayMs = typeof this.paperDelayMs === 'function' ? Number(this.paperDelayMs(args)) || 0 : Number(this.paperDelayMs) || 0;
+    if (delayMs > 0) {
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+
+    let fillPriceUsd = quote.expectedFillPriceUsd;
+    if (typeof this.paperLiveFillPrice === 'function') {
+      try {
+        const livePx = await this.paperLiveFillPrice({ ...args, fillPriceUsd });
+        if (Number(livePx) > 0) fillPriceUsd = Number(livePx);
+      } catch {
+        // keep quoted expectedFillPriceUsd
+      }
+    }
+
+    const effectiveAmountUsd = args.side === 'sell' && Number(args.positionTokens) > 0 ? Number(args.positionTokens) * fillPriceUsd : amountUsd;
     let platformFeeUsd;
     let networkFeeUsd;
     if (chainId === 'solana') {
       // same fees a real Jupiter trade pays (venue + router + gas, + token-account rent on a first buy)
-      platformFeeUsd = amountUsd * (solanaTradeFeePct(args.token).totalPct / 100);
+      platformFeeUsd = effectiveAmountUsd * (solanaTradeFeePct(args.token).totalPct / 100);
       networkFeeUsd = this.estimateNetworkFeeUsd(chainId, priorityFee, false);
       if (args.side === 'buy' && args.newTokenAccount) networkFeeUsd += PAPER_SOLANA_FEES.tokenAccountRentSol * CHAINS.solana.nativePriceUsd;
     } else {
       // Platform fee: max($0.30, 1%) per buy and sell
-      platformFeeUsd = Math.max(0.3, amountUsd * 0.01);
+      platformFeeUsd = Math.max(0.3, effectiveAmountUsd * 0.01);
       networkFeeUsd = this.estimateNetworkFeeUsd(chainId, priorityFee, gasless);
     }
 
@@ -280,7 +299,7 @@ export class ChainExecutionAdapter {
       paper: true,
       txHash: null,
       explorerUrl: null,
-      fillPriceUsd: quote.expectedFillPriceUsd,
+      fillPriceUsd,
       platformFeeUsd,
       networkFeeUsd,
       gaslessSponsored: Boolean(gasless),

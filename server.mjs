@@ -141,6 +141,20 @@ realTrader.priorityMicroLamports = () => Number(process.env.ODEX_DIRECT_PRIORITY
 realTrader.startBlockhashWarmer();
 
 engine.adapter.liveHooks = realTrader.hooks();
+// Paper Mode on Solana: match real-SOL execution time (~700 ms on direct pump.fun curve, ~1,000 ms on Jupiter)
+// and re-read the live on-chain curve price when the swap lands so paper fills see the same post-delay price.
+engine.adapter.paperDelayMs = ({ chainId, token }) => {
+  if (chainId !== 'solana') return 0;
+  const isDirectCurve = realTrader.routeSetting() === 'direct' && (token?.stage === 'pre-grad' || token?.venue === 'pumpfun');
+  return isDirectCurve ? 700 : 1000;
+};
+engine.adapter.paperLiveFillPrice = async ({ chainId, side, token, fillPriceUsd }) => {
+  if (chainId !== 'solana' || !token?.address || typeof engine.curveSource !== 'function') return fillPriceUsd;
+  const curves = await engine.curveSource([token.address]);
+  const c = curves?.get?.(token.address);
+  if (!(c?.priceUsd > 0)) return fillPriceUsd;
+  return side === 'buy' ? Math.max(Number(fillPriceUsd) || 0, c.priceUsd) : Math.min(Number(fillPriceUsd) || c.priceUsd, c.priceUsd);
+};
 
 // App integrations (Telegram, Discord): trade alerts pushed to your phone / channel
 export const notifier = new Notifier({ engine, redact: (x) => redact(String(x), alchemy.apiKey) });

@@ -203,3 +203,41 @@ test('PnL figures agree: period summary = calendar = sum of closed trades; parti
   assert.equal(s.losses, 1);
   assert.equal(s.copiedBuys, 3);
 });
+
+test('paper mode matches real-SOL execution delay and post-delay curve price on both buy and trader sell', async () => {
+  const { e, f } = setup();
+  f.mode = 'mirror';
+  const mint = 'SnowmeiMint1111111111111111111111111111pump';
+  e.adapter.paperDelayMs = () => 60;
+  let liveCurvePrice = 0.00000815; // spiked while waiting 60 ms on buy
+  e.adapter.paperLiveFillPrice = async ({ side, fillPriceUsd }) =>
+    side === 'buy' ? Math.max(fillPriceUsd, liveCurvePrice) : Math.min(fillPriceUsd, liveCurvePrice);
+
+  const t0 = Date.now();
+  await e.processTraderSignal({
+    ...sig(f, { address: mint, traderFillPriceUsd: 0.00000634, currentPriceUsd: 0.00000634 }),
+    traderBuyNative: 3.0,
+  });
+  const buyElapsed = Date.now() - t0;
+  assert.ok(buyElapsed >= 50, `paper buy waited for real-SOL execution delay (${buyElapsed} ms)`);
+  const pos = e.positions[0];
+  assert.equal(pos.entryPriceUsd, 0.00000815, 'paper buy filled at post-delay spiked curve price');
+
+  // Trader dumps 3 SOL at $0.00000676, crashing post-delay curve price to $0.00000532
+  liveCurvePrice = 0.00000532;
+  const t1 = Date.now();
+  await e.processTraderSignal({
+    chainId: 'solana',
+    side: 'sell',
+    traderHandle: f.handle,
+    traderWallet: f.traderWallet,
+    sellSharePct: 100,
+    traderBuyNative: 3.12,
+    token: { address: mint, symbol: 'Snowmei', traderFillPriceUsd: 0.00000676, currentPriceUsd: 0.00000676 },
+  });
+  const sellElapsed = Date.now() - t1;
+  assert.ok(sellElapsed >= 50, `paper sell waited for real-SOL execution delay (${sellElapsed} ms)`);
+  assert.equal(e.history[0].fillPriceUsd, 0.00000532, 'paper sell filled at post-dump curve price');
+  assert.ok(pos.realizedPnlUsd < 0, 'paper mode records the same loss as real SOL when whale dumps a micro-curve');
+});
+
