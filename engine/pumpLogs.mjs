@@ -204,7 +204,7 @@ export function pumpTradeFromLogs(logs, trader, { err = null } = {}) {
   if (trades.length > 1) return { skip: 'several trades in one transaction' };
   if (complete) return { skip: 'curve completed in this transaction' };
   const t = trades[0];
-  if (t.quoteMint !== WSOL_MINT) return { skip: 'coin not priced in SOL' };
+  if (t.quoteMint !== WSOL_MINT) return { skip: 'coin not priced in SOL', nonSolBuy: Boolean(t.isBuy) };
   if (t.solAmount <= 0n || t.tokenAmount <= 0n) return { skip: 'empty trade' };
   if (seenTokenProgram && !t.tokenProgram) t.tokenProgram = seenTokenProgram;
   return { trade: t };

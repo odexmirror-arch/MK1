@@ -1917,7 +1917,7 @@ export class CopyTradingEngine {
     let curves = new Map();
     let curvesFailed = false;
     if (!customMultiplierByPosId && typeof this.curveSource === 'function') {
-      const pumpMints = realMints.filter((m) => /pump$/i.test(m) || openPositions.some((p) => p.tokenAddress === m && (p.venue === 'pumpfun' || p.launchpad === 'pump.fun' || p.stage === 'pre-grad')));
+      const pumpMints = realMints.filter((m) => /pump$/i.test(m) || openPositions.some((p) => p.tokenAddress === m && (p.venue === 'pumpfun' || p.venue === 'launchlab' || p.launchpad === 'pump.fun' || p.stage === 'pre-grad')));
       if (pumpMints.length) {
         try {
           curves = await this.curveSource(pumpMints);
@@ -1929,7 +1929,7 @@ export class CopyTradingEngine {
     }
     // a pump.fun coin whose curve was read fine but is gone has graduated to PumpSwap
     if (!customMultiplierByPosId && !curvesFailed && typeof this.curveSource === 'function') {
-      for (const p of openPositions) if (p.stage === 'pre-grad' && (/pump$/i.test(p.tokenAddress || '') || p.venue === 'pumpfun') && !curves.has(p.tokenAddress)) p.stage = 'graduated';
+      for (const p of openPositions) if (p.stage === 'pre-grad' && (/pump$/i.test(p.tokenAddress || '') || p.venue === 'pumpfun' || p.venue === 'launchlab') && !curves.has(p.tokenAddress)) p.stage = 'graduated';
     }
     const live = customMultiplierByPosId ? new Map() : await this.fetchLivePrices(realMints.filter((m) => !curves.has(m)));
 

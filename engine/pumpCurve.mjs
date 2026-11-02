@@ -8,12 +8,66 @@
 import { findProgramAddress, base58Decode } from './onchainMeta.mjs';
 
 export const PUMP_PROGRAM = '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P';
+export const RAYDIUM_LAUNCHLAB_PROGRAM = 'LanMV9sAd7wArD4vJFi2qDdfnVhFxYSUg6eADduJ3uj';
+export const WSOL_MINT = 'So11111111111111111111111111111111111111112';
 const TOKEN_DECIMALS = 6;
 const curveCache = new Map(); // mint → PDA (derivation is pure; cache it)
+const launchLabCache = new Map(); // mint → Raydium LaunchLab PoolState PDA
 
 export function bondingCurvePda(mint) {
   if (!curveCache.has(mint)) curveCache.set(mint, findProgramAddress([Buffer.from('bonding-curve'), base58Decode(mint)], PUMP_PROGRAM));
   return curveCache.get(mint);
+}
+
+export function launchLabPoolPda(mint) {
+  if (!launchLabCache.has(mint)) {
+    launchLabCache.set(mint, findProgramAddress([Buffer.from('pool'), base58Decode(mint), base58Decode(WSOL_MINT)], RAYDIUM_LAUNCHLAB_PROGRAM));
+  }
+  return launchLabCache.get(mint);
+}
+
+/** Decode Raydium LaunchLab PoolState (429 bytes): status (u8 @ 17), decimals (18, 19), supply (21), virtualBase (37), virtualQuote (45), realBase (53), realQuote (61). */
+export function parseLaunchLabPool(data) {
+  const b = Buffer.isBuffer(data) ? data : Buffer.from(String(data), 'base64');
+  if (b.length < 69) return null;
+  const u64 = (o) => Number(b.readBigUInt64LE(o));
+  const status = b[17];
+  const baseDecimals = b[18] || 6;
+  const quoteDecimals = b[19] || 9;
+  const supply = u64(21);
+  const virtualBase = u64(37);
+  const virtualQuote = u64(45);
+  const realBase = u64(53);
+  const realQuote = u64(61);
+  if (!(virtualBase > realBase) || !(virtualQuote > 0) || !(supply > 0)) return null;
+  return {
+    status,
+    complete: status !== 0,
+    baseDecimals,
+    quoteDecimals,
+    supply,
+    virtualBase,
+    virtualQuote,
+    realBase,
+    realQuote,
+  };
+}
+
+export function launchLabMetrics(pool, solPriceUsd) {
+  if (!pool || !(solPriceUsd > 0) || !(pool.virtualBase > pool.realBase)) return null;
+  const effTokens = (pool.virtualBase - pool.realBase) / 10 ** pool.baseDecimals;
+  const effSol = (pool.virtualQuote + pool.realQuote) / 10 ** pool.quoteDecimals;
+  if (!(effTokens > 0) || !(effSol > 0)) return null;
+  const priceSol = effSol / effTokens;
+  const priceUsd = priceSol * solPriceUsd;
+  const supply = pool.supply / 10 ** pool.baseDecimals;
+  return {
+    priceUsd,
+    marketCapUsd: priceUsd * supply,
+    liquidityUsd: (pool.realQuote / 10 ** pool.quoteDecimals) * solPriceUsd * 2,
+    complete: pool.complete,
+    source: 'pump-curve',
+  };
 }
 
 /** Decode the BondingCurve account: 8-byte discriminator, five u64 fields, `complete` flag. */
@@ -70,19 +124,35 @@ export async function fetchPumpCurves(rpc, mints, solPriceUsd) {
   const out = new Map();
   const list = [...new Set(mints)].filter(Boolean).slice(0, 100);
   if (!list.length) return out;
-  const pdas = list.map((m) => {
+  const valid = [];
+  for (const m of list) {
     try {
-      return bondingCurvePda(m);
+      const pda = bondingCurvePda(m);
+      if (pda) valid.push([m, pda, 'pump']);
     } catch {
-      return null;
+      // ignore invalid base58
     }
-  });
-  const valid = list.map((m, i) => [m, pdas[i]]).filter(([, p]) => p);
+    if (!/pump$/i.test(m)) {
+      try {
+        const llPda = launchLabPoolPda(m);
+        if (llPda) valid.push([m, llPda, 'launchlab']);
+      } catch {
+        // ignore invalid base58
+      }
+    }
+  }
+  if (!valid.length) return out;
   const res = await rpc('getMultipleAccounts', [valid.map(([, p]) => p), { encoding: 'base64', commitment: 'processed' }]);
   (res?.value || []).forEach((acc, i) => {
-    if (!acc || acc.owner !== PUMP_PROGRAM || !acc.data?.[0]) return;
-    const m = curveMetrics(parseBondingCurve(acc.data[0]), solPriceUsd);
-    if (m && !m.complete) out.set(valid[i][0], m);
+    if (!acc || !acc.data?.[0]) return;
+    const [mint] = valid[i];
+    if (acc.owner === PUMP_PROGRAM) {
+      const m = curveMetrics(parseBondingCurve(acc.data[0]), solPriceUsd);
+      if (m && !m.complete) out.set(mint, m);
+    } else if (acc.owner === RAYDIUM_LAUNCHLAB_PROGRAM && !out.has(mint)) {
+      const m = launchLabMetrics(parseLaunchLabPool(acc.data[0]), solPriceUsd);
+      if (m && !m.complete) out.set(mint, m);
+    }
   });
   return out;
 }

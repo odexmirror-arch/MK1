@@ -18,7 +18,7 @@ export const PUMP_SUPPLY = 1_000_000_000;
 export function isPumpFunCoin(swap) {
   return Boolean(swap && /pump$/.test(String(swap.tokenMint || '')) && (swap.venue === 'pumpfun' || swap.venue === 'pumpswap'));
 }
-import { bondingCurvePda } from './pumpCurve.mjs';
+import { bondingCurvePda, RAYDIUM_LAUNCHLAB_PROGRAM } from './pumpCurve.mjs';
 import { pumpTradeFromLogs, swapFromPumpTrade, FAST_TRADE_PROGRAMS } from './pumpLogs.mjs';
 import { YellowstoneFeed } from './yellowstone.mjs';
 import { findProgramAddress, base58Decode as b58d } from './onchainMeta.mjs';
@@ -219,7 +219,7 @@ export function parseSwapFromTransaction(tx, wallet) {
   }
 
   // price from the pool leg (excludes fees, tips and deposits); SOL-quoted trades only
-  const swapVenue = keys.includes(PUMP_CURVE_PROGRAM) ? 'pumpfun' : keys.includes(PUMP_AMM_PROGRAM) ? 'pumpswap' : null;
+  const swapVenue = keys.includes(PUMP_CURVE_PROGRAM) ? 'pumpfun' : keys.includes(PUMP_AMM_PROGRAM) ? 'pumpswap' : keys.includes(RAYDIUM_LAUNCHLAB_PROGRAM) ? 'launchlab' : null;
   const poolQuote = quote.symbol === 'SOL' ? poolSolLeg(tx, wallet, { side, mint: tok.mint, venue: swapVenue, walletSol: quote.amount }) : null;
 
   const before = preTotals.get(tok.mint) || 0;
@@ -241,7 +241,7 @@ export function parseSwapFromTransaction(tx, wallet) {
     slot: tx.slot ?? null,
     blockTime: tx.blockTime ? tx.blockTime * 1000 : null,
     // where it traded: decided from the programs in the transaction, not from a data feed
-    venue: keys.includes(PUMP_CURVE_PROGRAM) ? 'pumpfun' : keys.includes(PUMP_AMM_PROGRAM) ? 'pumpswap' : null,
+    venue: swapVenue,
   };
 }
 
@@ -509,6 +509,7 @@ export class SolanaWalletWatcher {
       },
       onChange: () => this.emitStatus(),
     });
+    this.stream.keepLogsOnFlood = () => Boolean(this.fastDetect?.());
     // Optional second live feed (Sodae): the same transaction pushes from another provider. Both
     // feeds share the "seen signature" set, so each trade is handled once — by whichever arrived
     // first. Spam-flooded wallets are left out (their pushes would only burn the feed's credits).
@@ -600,10 +601,11 @@ export class SolanaWalletWatcher {
     const all = [...this.wallets.keys()];
     const flooded = all.filter((a) => this.wallets.get(a)?.mode === 'balances');
     const on = this.running && this.streamEnabled;
+    const keepFastLogs = Boolean(this.fastDetect?.());
     if (this.useBalanceStream) {
       const normal = all.filter((a) => !flooded.includes(a));
       for (const a of flooded) this.stream.accountMode.delete(a);
-      this.stream.setWallets(normal);
+      this.stream.setWallets(keepFastLogs ? all : normal);
       for (const a of flooded) this.balanceStream.accountMode.add(a);
       for (const a of [...this.balanceStream.accountMode]) if (!flooded.includes(a)) this.balanceStream.accountMode.delete(a);
       this.balanceStream.setWallets(flooded);
@@ -612,8 +614,12 @@ export class SolanaWalletWatcher {
     } else {
       this.stream.setWallets(all);
       // switch already-open subscriptions between transaction and balance watching
-      for (const a of flooded) this.stream.setBalanceWatch(a, true);
-      for (const a of [...this.stream.accountMode]) if (!flooded.includes(a)) this.stream.setBalanceWatch(a, false);
+      if (keepFastLogs) {
+        for (const a of [...this.stream.accountMode]) this.stream.setBalanceWatch(a, false);
+      } else {
+        for (const a of flooded) this.stream.setBalanceWatch(a, true);
+        for (const a of [...this.stream.accountMode]) if (!flooded.includes(a)) this.stream.setBalanceWatch(a, false);
+      }
       this.balanceStream.stop();
     }
     if (on) this.stream.start();
@@ -719,7 +725,12 @@ export class SolanaWalletWatcher {
       if (r.forged) this.fastStats.forged += 1;
       this.fastStats.misses += 1;
       this.fastStats.missReasons[r.skip] = (this.fastStats.missReasons[r.skip] || 0) + 1;
+      if (r.nonSolBuy) {
+        this.seenSigs.add(ev.signature);
+        return;
+      }
     }
+    if (w.mode === 'balances' && this.fastDetect()) return;
     this.streamQueue.push({ w, ev });
     if (this.streamQueue.length > 200) this.streamQueue.splice(0, this.streamQueue.length - 200);
     this.drainStream();
@@ -1110,7 +1121,7 @@ export class SolanaWalletWatcher {
     // on-chain price; the details are filled in when they arrive.
     // pump.fun coins are all alike: 1 billion supply, mint and freeze authority revoked. Their
     // details are not worth waiting for: market cap comes from the trader's own fill price.
-    const pumpCoin = isPumpFunCoin(swap) || (via === 'fast-logs' && Boolean(swap.curve));
+    const pumpCoin = isPumpFunCoin(swap) || swap.venue === 'launchlab' || (via === 'fast-logs' && Boolean(swap.curve));
     const useFastInfoCache = via === 'fast-logs' && Boolean(swap.curve) && this.tokenInfo?.cache instanceof Map;
     const fastCachedHit = useFastInfoCache ? this.tokenInfo.cache.get(swap.tokenMint) : null;
     const budgetMs = pumpCoin ? Math.min(this.tokenInfoBudgetMs, this.pumpInfoBudgetMs) : this.tokenInfoBudgetMs;

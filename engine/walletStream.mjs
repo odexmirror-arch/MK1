@@ -345,6 +345,7 @@ export class WalletStream {
     if (r.count <= this.floodPerSec * 10) return false;
     this.rate.delete(address);
     if (this.subKind.get(address) !== 'account') {
+      if (typeof this.keepLogsOnFlood === 'function' && this.keepLogsOnFlood()) return false;
       // Too many transactions mention it: switch to watching its SOL balance only
       this.unsubscribe(address);
       this.accountMode.add(address);

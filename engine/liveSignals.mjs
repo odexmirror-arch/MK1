@@ -213,7 +213,7 @@ export class LiveSignalService {
   toEngineSignal(sig, follow) {
     // pump.fun / PumpSwap: read from the trader's own transaction first (works for brand-new coins
     // DexScreener doesn't list yet, and for pump.fun coins whose address doesn't end in "pump")
-    const isLaunchpad = sig.venue === 'pumpfun' || sig.venue === 'pumpswap' || sig.dexId === 'pumpfun' || sig.dexId === 'pumpswap' || /pump$/i.test(sig.tokenMint);
+    const isLaunchpad = sig.venue === 'pumpfun' || sig.venue === 'pumpswap' || sig.venue === 'launchlab' || sig.dexId === 'pumpfun' || sig.dexId === 'pumpswap' || sig.dexId === 'launchlab' || /pump$/i.test(sig.tokenMint);
     return {
       chainId: 'solana',
       side: sig.side,
@@ -237,7 +237,7 @@ export class LiveSignalService {
         name: sig.name || sig.symbol,
         isLaunchpad,
         // a pump.fun coin DexScreener doesn't list yet is still on its bonding curve
-        stage: sig.venue === 'pumpfun' ? 'pre-grad' : sig.venue === 'pumpswap' ? 'graduated' : sig.dexId === 'pumpfun' || (!sig.dexId && /pump$/i.test(sig.tokenMint)) ? 'pre-grad' : 'graduated',
+        stage: sig.venue === 'pumpfun' || sig.venue === 'launchlab' ? 'pre-grad' : sig.venue === 'pumpswap' ? 'graduated' : sig.dexId === 'pumpfun' || sig.dexId === 'launchlab' || (!sig.dexId && /pump$/i.test(sig.tokenMint)) ? 'pre-grad' : 'graduated',
         marketCapUsd: sig.marketCapUsd,
         liquidityUsd: sig.liquidityUsd,
         traderFillPriceUsd: sig.txPriceUsd,
