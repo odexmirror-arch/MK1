@@ -736,17 +736,21 @@ export class SolanaWalletWatcher {
     if (this.seenSigs.has(sig)) return null;
     let heldAfterRaw = null;
     if (!trade.isBuy) {
-      try {
-        const atas = [TOKEN_PROGRAM, TOKEN_2022_PROGRAM].map((p) => findProgramAddress([b58d(w.address), b58d(p), b58d(trade.mint)].map((b) => Buffer.from(b)), ASSOCIATED_TOKEN_PROGRAM));
-        const res = await this.rpc('getMultipleAccounts', [atas, { encoding: 'base64', commitment: 'processed' }], { fast: true });
-        const vals = res?.value;
-        if (!Array.isArray(vals)) throw new Error('no balance');
-        heldAfterRaw = vals.reduce((sum, a) => {
-          const b = a?.data?.[0] ? Buffer.from(a.data[0], 'base64') : null;
-          return sum + (b && b.length >= 72 ? b.readBigUInt64LE(64) : 0n);
-        }, 0n);
-      } catch {
-        heldAfterRaw = null;
+      if (typeof this.skipSellShare === 'function' && this.skipSellShare(w.address)) {
+        heldAfterRaw = 0n;
+      } else {
+        try {
+          const atas = [TOKEN_PROGRAM, TOKEN_2022_PROGRAM].map((p) => findProgramAddress([b58d(w.address), b58d(p), b58d(trade.mint)].map((b) => Buffer.from(b)), ASSOCIATED_TOKEN_PROGRAM));
+          const res = await this.rpc('getMultipleAccounts', [atas, { encoding: 'base64', commitment: 'processed' }], { fast: true });
+          const vals = res?.value;
+          if (!Array.isArray(vals)) throw new Error('no balance');
+          heldAfterRaw = vals.reduce((sum, a) => {
+            const b = a?.data?.[0] ? Buffer.from(a.data[0], 'base64') : null;
+            return sum + (b && b.length >= 72 ? b.readBigUInt64LE(64) : 0n);
+          }, 0n);
+        } catch {
+          heldAfterRaw = null;
+        }
       }
       if (heldAfterRaw === null) {
         // balance unknown: the normal path works out the sell share from the confirmed transaction

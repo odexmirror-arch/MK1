@@ -513,6 +513,16 @@ test('PD21 Yellowstone gRPC TradeEvent curve reserves skip getMultipleAccounts R
   assert.equal(calls.length, 0, `zero RPC calls during directQuote when Yellowstone curve + cached blockhash are warm: ${calls.join(', ')}`);
   const r = await trader.execute({ side: 'buy', token: fastToken, amountUsd: 10, quote: q, slippagePct: 10 });
   assert.equal(r.ok, true, r.error);
+
+  // Now sell using Yellowstone TradeEvent curve reserves + cached mintMetaCache -> zero RPC calls during sell quote
+  await new Promise((res) => setImmediate(res));
+  trader.buyMintsInFlight = new Map();
+  calls.length = 0;
+  const qs = await trader.quote({ side: 'sell', token: fastToken, tokenAmount: 'all', slippagePct: 15 });
+  assert.equal(qs.route, 'direct');
+  assert.equal(calls.length, 0, `zero RPC calls during direct SELL quote when Yellowstone curve + mintMetaCache are warm: ${calls.join(', ')}`);
+  const rs = await trader.execute({ side: 'sell', token: fastToken, tokenAmount: 'all', quote: qs, slippagePct: 15 });
+  assert.equal(rs.ok, true, rs.error);
 });
 
 

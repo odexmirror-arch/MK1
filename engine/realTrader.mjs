@@ -491,7 +491,19 @@ export class RealTrader {
     const curveAddr = PD.bondingCurveAddress(mint);
     const ataSpl = PD.ataAddress(this.address, mint, PD.TOKEN_PROGRAM);
     const ata2022 = PD.ataAddress(this.address, mint, PD.TOKEN_2022_PROGRAM);
-    const fastTc = side === 'buy' && token?.curve && Number(token.curve.virtualSolReserves) > 0 && Number(token.curve.virtualTokenReserves) > 0 && Number(token.curve.realTokenReserves) > 0 && (token.curve.tokenProgram === PD.TOKEN_PROGRAM || token.curve.tokenProgram === PD.TOKEN_2022_PROGRAM) && !token.curve.mayhem && !token.curve.cashback && Number(this.balance?.sol) > 0 ? token.curve : null;
+    if (!this.mintMetaCache) this.mintMetaCache = new Map();
+    const cachedMeta = this.mintMetaCache.get(mint);
+    const fastTc =
+      token?.curve &&
+      Number(token.curve.virtualSolReserves) > 0 &&
+      Number(token.curve.virtualTokenReserves) > 0 &&
+      !token.curve.mayhem &&
+      !token.curve.cashback &&
+      (side === 'buy'
+        ? Number(token.curve.realTokenReserves) > 0 && (token.curve.tokenProgram === PD.TOKEN_PROGRAM || token.curve.tokenProgram === PD.TOKEN_2022_PROGRAM) && Number(this.balance?.sol) > 0
+        : cachedMeta && cachedMeta.heldRaw > 0n && !this.buyInProgress(mint) && (token.curve.tokenProgram === PD.TOKEN_PROGRAM || token.curve.tokenProgram === PD.TOKEN_2022_PROGRAM || cachedMeta.tokenProgram))
+        ? token.curve
+        : null;
     let curve;
     let baseTokenProgram;
     let userAta;
@@ -503,17 +515,17 @@ export class RealTrader {
       curve = {
         virtualTokenReserves: BigInt(Math.round(Number(fastTc.virtualTokenReserves))),
         virtualQuoteReserves: BigInt(Math.round(Number(fastTc.virtualSolReserves))),
-        realTokenReserves: BigInt(Math.round(Number(fastTc.realTokenReserves))),
+        realTokenReserves: BigInt(Math.round(Number(fastTc.realTokenReserves || 0))),
         complete: false,
         solPaired: true,
         isCashback: false,
         isMayhem: false,
       };
-      baseTokenProgram = fastTc.tokenProgram;
+      baseTokenProgram = fastTc.tokenProgram === PD.TOKEN_PROGRAM || fastTc.tokenProgram === PD.TOKEN_2022_PROGRAM ? fastTc.tokenProgram : cachedMeta.tokenProgram;
       userAta = baseTokenProgram === PD.TOKEN_2022_PROGRAM ? ata2022 : ataSpl;
-      ataExists = false;
-      preTokens = 0n;
-      preLamports = BigInt(Math.round(Number(this.balance.sol) * 1e9));
+      ataExists = side === 'sell';
+      preTokens = side === 'sell' ? cachedMeta.heldRaw : 0n;
+      preLamports = BigInt(Math.round(Number(this.balance?.sol || 0) * 1e9));
       blockhash = await this.recentBlockhash().catch(() => null);
     } else {
       const [bhP, accP] = [this.recentBlockhash().catch(() => null), this.rpc('getMultipleAccounts', [[curveAddr, mint, this.address, ataSpl, ata2022], { encoding: 'base64', commitment: 'processed' }])];
@@ -617,17 +629,20 @@ export class RealTrader {
     } catch (err) {
       return { fallback: true, error: `sign: ${err.message}` };
     }
-    // ----- fastCurve buy: blast + send in parallel with simulation (on-chain minTokensOut enforces ceiling) -----
-    let fastSent = false;
-    let fastSendStart = 0;
-    let fastSig = signed.signature;
-    let fastSendP = null;
-    if (d.fastCurve && side === 'buy') {
-      if (tooLate()) return { late: true, error: "too late to send — it would land past the late-copy limit after the trader's buy" };
+    // ----- fastCurve swap: start simulation + blast + send in parallel in the same tick -----
+    if (d.fastCurve) {
+      if (side === 'buy' && tooLate()) return { late: true, error: "too late to send — it would land past the late-copy limit after the trader's buy" };
       if (!this.sentSigs) this.sentSigs = new Map();
       for (const [k, t] of this.sentSigs) if (this.now() - t > 120_000) this.sentSigs.delete(k);
       if (this.sentSigs.has(signed.signature)) return { fallback: true, error: 'identical transaction already sent — not sending it twice' };
       this.sentSigs.set(signed.signature, this.now());
+    }
+    const simP = this.rpc('simulateTransaction', [signed.base64, { encoding: 'base64', commitment: 'processed', sigVerify: true, replaceRecentBlockhash: false, accounts: { encoding: 'base64', addresses: [this.address, d.userAta] } }]);
+    let fastSent = false;
+    let fastSendStart = 0;
+    let fastSig = signed.signature;
+    let fastSendP = null;
+    if (d.fastCurve) {
       fastSent = true;
       fastSendStart = this.now();
       this.blastSignedTransaction(signed.base64);
@@ -636,7 +651,7 @@ export class RealTrader {
     // ----- simulate and check the balance changes -----
     let sim;
     try {
-      sim = await this.rpc('simulateTransaction', [signed.base64, { encoding: 'base64', commitment: 'processed', sigVerify: true, replaceRecentBlockhash: false, accounts: { encoding: 'base64', addresses: [this.address, d.userAta] } }]);
+      sim = await simP;
     } catch (err) {
       if (!fastSent) return { fallback: true, error: `simulation: ${err.message}` };
     }
@@ -663,10 +678,10 @@ export class RealTrader {
       inAmount = d.lamportsIn;
       outAmount = tokDelta > 0n ? tokDelta : d.tokensOut;
     } else {
-      if (-tokDelta !== d.amount) return { fallback: true, error: `simulation sold ${-tokDelta} tokens, expected ${d.amount}` };
-      if (solDelta < minOut - 200_000n) return { fallback: true, error: `simulation returned ${solDelta} lamports, under the minimum` };
+      if (!fastSent && -tokDelta !== d.amount) return { fallback: true, error: `simulation sold ${-tokDelta} tokens, expected ${d.amount}` };
+      if (!fastSent && solDelta < minOut - 200_000n) return { fallback: true, error: `simulation returned ${solDelta} lamports, under the minimum` };
       inAmount = d.amount;
-      outAmount = solDelta > 0n ? solDelta : 0n;
+      outAmount = solDelta > 0n ? solDelta : d.lamportsOut;
     }
     let sendStart = fastSendStart;
     let sig = fastSig;
@@ -708,6 +723,15 @@ export class RealTrader {
     }
     this.directStats.direct += 1;
     this.directStats.lastDirectAt = this.now();
+    if (!this.mintMetaCache) this.mintMetaCache = new Map();
+    if (side === 'buy') {
+      const prev = this.mintMetaCache.get(mint)?.heldRaw || d.preTokens || 0n;
+      this.mintMetaCache.set(mint, { tokenProgram: d.baseTokenProgram, heldRaw: prev + BigInt(outAmount || 0n) });
+    } else {
+      const prev = this.mintMetaCache.get(mint)?.heldRaw || d.preTokens || 0n;
+      const rem = prev > BigInt(inAmount || 0n) ? prev - BigInt(inAmount || 0n) : 0n;
+      this.mintMetaCache.set(mint, { tokenProgram: d.baseTokenProgram, heldRaw: rem });
+    }
     // exact amounts from the simulation as a fallback; readFill prefers the real transaction
     const exec = side === 'buy' ? { totalInputAmount: String(inAmount), totalOutputAmount: String(outAmount) } : { totalInputAmount: String(inAmount), totalOutputAmount: String(outAmount) };
     return { ok: true, signature: sig, exec, inAmount: String(inAmount), sendMs };

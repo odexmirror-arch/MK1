@@ -145,10 +145,10 @@ realTrader.startBlockhashWarmer();
 engine.adapter.liveHooks = realTrader.hooks();
 // Paper Mode on Solana: match real-SOL execution time (~700 ms on direct pump.fun curve, ~1,000 ms on Jupiter)
 // and re-read the live on-chain curve price when the swap lands so paper fills see the same post-delay price.
-engine.adapter.paperDelayMs = ({ chainId, side, token }) => {
+engine.adapter.paperDelayMs = ({ chainId, token }) => {
   if (chainId !== 'solana') return 0;
   const isDirectCurve = realTrader.routeSetting() === 'direct' && (token?.stage === 'pre-grad' || token?.venue === 'pumpfun');
-  if (isDirectCurve && side === 'buy' && Number(token?.curve?.virtualSolReserves) > 0) return 250;
+  if (isDirectCurve && Number(token?.curve?.virtualSolReserves) > 0) return 250;
   return isDirectCurve ? 700 : 1000;
 };
 engine.adapter.paperLiveFillPrice = async ({ chainId, side, token, fillPriceUsd }) => {

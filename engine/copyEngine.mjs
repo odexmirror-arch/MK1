@@ -1205,6 +1205,7 @@ export class CopyTradingEngine {
       cause: follow.mode === 'auto-exit' ? 'trader sold' : 'Mirror sell',
       traderExitPriceUsd: Number(signal.token?.traderFillPriceUsd) || null,
       traderSellSol: Number(signal.traderPoolSol > 0 ? signal.traderPoolSol : signal.traderBuyNative) || null,
+      traderSellCurve: signal.token?.curve || null,
     });
   }
 
@@ -1252,11 +1253,12 @@ export class CopyTradingEngine {
     }
   }
 
-  async executePositionSellNow(positionId, { sellPct = 100, exactTokens = null, cause = 'manual sell', traderExitPriceUsd = null, traderSellSol = null } = {}) {
+  async executePositionSellNow(positionId, { sellPct = 100, exactTokens = null, cause = 'manual sell', traderExitPriceUsd = null, traderSellSol = null, traderSellCurve = null } = {}) {
     const pos = this.positions.find((p) => p.id === positionId);
     if (!pos || pos.remainingTokens <= 0) {
       return { ok: false, error: 'Position not found or already closed.' };
     }
+    if (traderSellCurve) pos.lastCurve = traderSellCurve;
 
     const wallet = this.getWalletById(pos.walletId);
     const chain = CHAINS[pos.chainId];
@@ -1338,6 +1340,7 @@ export class CopyTradingEngine {
           marketCapUsd: pos.currentMarketCapUsd,
           liquidityUsd: pos.liquidityUsd,
           paperSellFillPriceUsd,
+          curve: traderSellCurve || pos.lastCurve || null,
         },
         amountUsd: grossValueUsd,
         slippagePct: sellSlippagePct,
@@ -1384,7 +1387,7 @@ export class CopyTradingEngine {
       chainId: pos.chainId,
       wallet,
       side: 'sell',
-      token: { address: pos.tokenAddress, symbol: pos.symbol, stage: pos.stage, launchpad: pos.launchpad, marketCapUsd: pos.currentMarketCapUsd, createdAt: pos.tokenCreatedAt, venue: pos.venue },
+      token: { address: pos.tokenAddress, symbol: pos.symbol, stage: pos.stage, launchpad: pos.launchpad, marketCapUsd: pos.currentMarketCapUsd, createdAt: pos.tokenCreatedAt, venue: pos.venue, curve: traderSellCurve || pos.lastCurve || null },
       // paper fee is 1% of what the sale actually fills at (after price impact)
       amountUsd: real ? grossValueUsd : tokensSold * quote.expectedFillPriceUsd,
       quote,

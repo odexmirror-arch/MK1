@@ -90,6 +90,11 @@ export class LiveSignalService {
     this.watcher.onSignal = (s) => this.handleSignal(s);
     this.watcher.onStatus = () => this.pushStatus();
     this.watcher.onTokenInfoLate = (mint, info) => this.applyLateTokenInfo(mint, info);
+    // In Auto-Exit mode every trader sell closes 100% of our copy, so skip the getMultipleAccounts sell-share RPC wait
+    this.watcher.skipSellShare = (addr) => {
+      const fs = this.engine.follows.filter((f) => f.chainId === 'solana' && f.traderWallet === addr && f.status === 'copying');
+      return fs.length > 0 && fs.every((f) => f.mode === 'auto-exit');
+    };
     // fast trade detection: a copied trade whose trader trade never confirmed is closed
     this.watcher.onPhantomTrade = (p) => {
       const s = this.signals.find((x) => x.signature === p.signature);
