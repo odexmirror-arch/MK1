@@ -28,6 +28,8 @@ export function parseBondingCurve(data) {
     realSolReserves: u64(32),
     tokenTotalSupply: u64(40),
     complete: b[48] === 1,
+    mayhem: b.length > 81 ? b[81] === 1 : false,
+    cashback: b.length > 82 ? b[82] === 1 : false,
   };
 }
 
@@ -48,6 +50,15 @@ export function curveMetrics(curve, solPriceUsd) {
     liquidityUsd: (curve.realSolReserves / 1e9) * solPriceUsd * 2,
     complete: curve.complete,
     source: 'pump-curve',
+    curve: {
+      virtualTokenReserves: curve.virtualTokenReserves,
+      virtualSolReserves: curve.virtualSolReserves,
+      realTokenReserves: curve.realTokenReserves,
+      realSolReserves: curve.realSolReserves,
+      mayhem: Boolean(curve.mayhem),
+      cashback: Boolean(curve.cashback),
+      at: Date.now(),
+    },
   };
 }
 
@@ -67,7 +78,7 @@ export async function fetchPumpCurves(rpc, mints, solPriceUsd) {
     }
   });
   const valid = list.map((m, i) => [m, pdas[i]]).filter(([, p]) => p);
-  const res = await rpc('getMultipleAccounts', [valid.map(([, p]) => p), { encoding: 'base64', commitment: 'confirmed' }]);
+  const res = await rpc('getMultipleAccounts', [valid.map(([, p]) => p), { encoding: 'base64', commitment: 'processed' }]);
   (res?.value || []).forEach((acc, i) => {
     if (!acc || acc.owner !== PUMP_PROGRAM || !acc.data?.[0]) return;
     const m = curveMetrics(parseBondingCurve(acc.data[0]), solPriceUsd);

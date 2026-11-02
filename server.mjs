@@ -558,8 +558,8 @@ engine.livePriceMinAgeMs = 1500;
 let lastTickAt = 0;
 setInterval(async () => {
   if (!autoTickEnabled || ticksRunning >= 2 || shuttingDownFlag) return;
-  const realOpen = engine.positions.some((p) => p.remainingTokens > 0 && p.isPaper === false);
-  if (!realOpen && Date.now() - lastTickAt < 1950) return;
+  const fastOpen = engine.positions.some((p) => p.remainingTokens > 0 && (p.isPaper === false || p.stage === 'pre-grad' || p.venue === 'pumpfun'));
+  if (!fastOpen && Date.now() - lastTickAt < 1950) return;
   lastTickAt = Date.now();
   ticksRunning += 1;
   try {

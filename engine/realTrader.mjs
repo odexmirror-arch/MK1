@@ -263,7 +263,7 @@ export class RealTrader {
     };
     const r = await this.rpc('getTokenAccountsByOwner', [this.address, { mint }, { encoding: 'jsonParsed', commitment: 'confirmed' }]);
     const raw = sum(r, false);
-    if (raw > 0n) return raw;
+    if (raw > 0n || mint === USDC_MINT) return raw;
     // Nothing found by mint: also look through every token account of both token programs.
     // Newer pump.fun coins are Token-2022 tokens and some RPC providers miss them in the
     // mint-filtered lookup — that made held tokens look "gone" and blocked their sells.
@@ -495,6 +495,7 @@ export class RealTrader {
     const cachedMeta = this.mintMetaCache.get(mint);
     const fastTc =
       token?.curve &&
+      (!token.curve.at || this.now() - Number(token.curve.at) < 2000) &&
       Number(token.curve.virtualSolReserves) > 0 &&
       Number(token.curve.virtualTokenReserves) > 0 &&
       !token.curve.mayhem &&

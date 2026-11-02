@@ -1328,6 +1328,8 @@ export class CopyTradingEngine {
       });
       if (sc?.fillPriceUsd > 0) paperSellFillPriceUsd = sc.fillPriceUsd;
     }
+    const freshPosCurve = pos.lastCurve && (!pos.lastCurve.at || Date.now() - Number(pos.lastCurve.at) < 2000) ? pos.lastCurve : null;
+    const sellCurve = traderSellCurve || freshPosCurve;
     let quote;
     try {
       quote = await this.adapter.getSwapQuote({
@@ -1340,7 +1342,7 @@ export class CopyTradingEngine {
           marketCapUsd: pos.currentMarketCapUsd,
           liquidityUsd: pos.liquidityUsd,
           paperSellFillPriceUsd,
-          curve: traderSellCurve || pos.lastCurve || null,
+          curve: sellCurve,
         },
         amountUsd: grossValueUsd,
         slippagePct: sellSlippagePct,
@@ -1387,7 +1389,7 @@ export class CopyTradingEngine {
       chainId: pos.chainId,
       wallet,
       side: 'sell',
-      token: { address: pos.tokenAddress, symbol: pos.symbol, stage: pos.stage, launchpad: pos.launchpad, marketCapUsd: pos.currentMarketCapUsd, createdAt: pos.tokenCreatedAt, venue: pos.venue, curve: traderSellCurve || pos.lastCurve || null },
+      token: { address: pos.tokenAddress, symbol: pos.symbol, stage: pos.stage, launchpad: pos.launchpad, marketCapUsd: pos.currentMarketCapUsd, createdAt: pos.tokenCreatedAt, venue: pos.venue, curve: sellCurve },
       // paper fee is 1% of what the sale actually fills at (after price impact)
       amountUsd: real ? grossValueUsd : tokensSold * quote.expectedFillPriceUsd,
       quote,
@@ -1937,6 +1939,7 @@ export class CopyTradingEngine {
         pos.liquidityUsd = Math.round(curve.liquidityUsd);
         pos.priceUpdatedAt = now;
         pos.priceSource = 'pump-curve';
+        if (curve.curve) pos.lastCurve = curve.curve;
       } else if (customMultiplierByPosId && customMultiplierByPosId[pos.id] !== undefined) {
         const mult = customMultiplierByPosId[pos.id];
         pos.currentPriceUsd = Number((pos.currentPriceUsd * mult).toFixed(8));
