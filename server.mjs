@@ -553,7 +553,7 @@ let ticksRunning = 0;
 // Exits are checked every 0.5 s while a REAL trade is open (on a falling pump.fun coin, each
 // second of waiting costs several %), every 2 s otherwise. Pump.fun prices come straight from
 // the chain each check; DexScreener prices are reused for 1.5 s so it is never flooded.
-const FAST_TICK_MS = Number(process.env.ODEX_REAL_EXIT_TICK_MS || 500);
+const FAST_TICK_MS = Number(process.env.ODEX_REAL_EXIT_TICK_MS || 250);
 engine.livePriceMinAgeMs = 1500;
 let lastTickAt = 0;
 setInterval(async () => {

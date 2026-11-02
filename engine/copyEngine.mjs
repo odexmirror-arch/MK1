@@ -1814,11 +1814,15 @@ export class CopyTradingEngine {
    * Real on-chain fills (from watched wallets) are the most trustworthy price. Record one and
    * move every open position in that token to it.
    */
-  observeTradePrice(mint, priceUsd, at = Date.now()) {
+  observeTradePrice(mint, priceUsd, at = Date.now(), curve = null) {
     const price = Number(priceUsd);
     if (!mint || !(price > 0)) return;
     if (!this.lastTradePrice) this.lastTradePrice = new Map();
     this.lastTradePrice.set(mint, { priceUsd: price, at });
+    const freshCurve =
+      curve && Number(curve.virtualSolReserves) > 0 && Number(curve.virtualTokenReserves) > 0
+        ? { ...curve, at: Date.now() }
+        : null;
     for (const pos of this.positions) {
       if (pos.tokenAddress !== mint || pos.remainingTokens <= 0) continue;
       const ratio = pos.currentPriceUsd > 0 ? price / pos.currentPriceUsd : 1;
@@ -1826,6 +1830,7 @@ export class CopyTradingEngine {
       pos.currentPriceUsd = price;
       pos.priceUpdatedAt = at;
       pos.priceSource = 'on-chain fill';
+      if (freshCurve) pos.lastCurve = freshCurve;
       if (price > pos.peakPriceUsd) pos.peakPriceUsd = price;
       if (pos.currentMarketCapUsd > (pos.peakMarketCapUsd || 0)) pos.peakMarketCapUsd = pos.currentMarketCapUsd;
     }

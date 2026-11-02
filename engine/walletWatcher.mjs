@@ -1110,24 +1110,30 @@ export class SolanaWalletWatcher {
     // on-chain price; the details are filled in when they arrive.
     // pump.fun coins are all alike: 1 billion supply, mint and freeze authority revoked. Their
     // details are not worth waiting for: market cap comes from the trader's own fill price.
-    const pumpCoin = isPumpFunCoin(swap);
+    const pumpCoin = isPumpFunCoin(swap) || (via === 'fast-logs' && Boolean(swap.curve));
+    const useFastInfoCache = via === 'fast-logs' && Boolean(swap.curve) && this.tokenInfo?.cache instanceof Map;
+    const fastCachedHit = useFastInfoCache ? this.tokenInfo.cache.get(swap.tokenMint) : null;
     const budgetMs = pumpCoin ? Math.min(this.tokenInfoBudgetMs, this.pumpInfoBudgetMs) : this.tokenInfoBudgetMs;
     const infoPromise = this.tokenInfo.get(swap.tokenMint);
     let infoLate = false;
     let budgetTimer = null;
     const [info, solPrice] = await Promise.all([
-      budgetMs > 0
-        ? Promise.race([
-            infoPromise,
-            new Promise((resolve) => {
-              budgetTimer = setTimeout(() => {
-                infoLate = true;
-                resolve(null);
-              }, budgetMs);
-              budgetTimer.unref?.();
-            }),
-          ])
-        : infoPromise,
+      useFastInfoCache
+        ? fastCachedHit && Date.now() - fastCachedHit.at < (this.tokenInfo.ttlMs || 60_000)
+          ? Promise.resolve(fastCachedHit.info)
+          : ((infoLate = true), Promise.resolve(null))
+        : budgetMs > 0
+          ? Promise.race([
+              infoPromise,
+              new Promise((resolve) => {
+                budgetTimer = setTimeout(() => {
+                  infoLate = true;
+                  resolve(null);
+                }, budgetMs);
+                budgetTimer.unref?.();
+              }),
+            ])
+          : infoPromise,
       typeof this.tokenInfo.solPriceFast === 'function' ? this.tokenInfo.solPriceFast() : this.tokenInfo.solPriceUsd(),
     ]);
     if (budgetTimer) clearTimeout(budgetTimer);

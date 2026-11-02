@@ -323,7 +323,7 @@ export class LiveSignalService {
 
     // Every live fill from a watched wallet is a real price for that token
     if (!sig.backfill && typeof this.engine.observeTradePrice === 'function') {
-      this.engine.observeTradePrice(sig.tokenMint, sig.txPriceUsd, sig.blockTime || Date.now());
+      this.engine.observeTradePrice(sig.tokenMint, sig.txPriceUsd, sig.blockTime || Date.now(), sig.curve || null);
     }
     // Log the trader's trade before running the swap so any 2nd buy arriving while the 1st swap is
     // still in flight already knows the trader entered this coin earlier.
@@ -353,6 +353,16 @@ export class LiveSignalService {
         record.decisions.push({ followId: f.id, handle: f.handle, followStatus: f.status, status: ok ? 'copied' : r?.status || null, reason: r?.reason || null, sizeUsd: null, chaseGapPct: r?.chaseGapPct ?? null });
       }
       record.paperCopied = record.copies.some((c) => c.ok);
+    }
+
+    // Event-driven 0ms auto-exit check: if any existing open position in this token crossed TP/SL/Trail on this live trade, evaluate immediately
+    if (!sig.backfill && sig.tokenMint && typeof this.engine.evaluatePositionExits === 'function') {
+      const now = Date.now();
+      for (const pos of this.engine.positions || []) {
+        if (pos.tokenAddress === sig.tokenMint && pos.remainingTokens > 0 && now - (pos.openedAt || 0) >= 500) {
+          await this.engine.evaluatePositionExits(pos, now).catch(() => {});
+        }
+      }
     }
 
     // Dax's trader log: what the trader did and what each follow did about it

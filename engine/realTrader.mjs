@@ -1143,7 +1143,7 @@ export class RealTrader {
     const tokDec = await this.getDecimals(mint).catch(() => null);
     let fill;
     try {
-      fill = await this.readFill({ signature, side, mint, quoteMint, exec, order, tokDec, newTokenAccount });
+      fill = await this.readFill({ signature, side, mint, quoteMint, exec, order, tokDec, newTokenAccount, fastCurve: Boolean(quote?._direct?.fastCurve) });
     } catch (err) {
       // The swap DID land: never report it as failed (that would leave untracked tokens in the
       // wallet). Book it from the quote and say the numbers are estimated.
@@ -1264,7 +1264,7 @@ export class RealTrader {
    * Exact amounts: Jupiter's execute result where present, the on-chain transaction for the
    * network fee (fee + priority + new token-account rent).
    */
-  async readFill({ signature, side, mint, quoteMint, exec, order, tokDec, newTokenAccount = false }) {
+  async readFill({ signature, side, mint, quoteMint, exec, order, tokDec, newTokenAccount = false, fastCurve = false }) {
     const big = (v) => {
       try {
         return v === undefined || v === null || v === '' ? null : BigInt(String(v));
@@ -1281,8 +1281,9 @@ export class RealTrader {
     let tx = null;
     // When Jupiter /execute already returned exact input & output amounts, never block the trade for
     // 6 seconds waiting on getTransaction indexing: try once immediately (+ 1 micro-retry).
+    // On fastCurve direct swaps where simulation already computed exact amounts, book in 0 ms without blocking on getTransaction.
     const haveExecAmounts = inputRaw !== null && outputRaw !== null;
-    const maxTries = haveExecAmounts ? 2 : 6;
+    const maxTries = fastCurve && haveExecAmounts ? 0 : haveExecAmounts ? 2 : 6;
     const waitMs = haveExecAmounts ? 60 : 200;
     for (let i = 0; i < maxTries && !tx; i++) {
       try {
