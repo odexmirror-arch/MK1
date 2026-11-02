@@ -1659,7 +1659,7 @@ function renderFollowsList() {
             : `1:1 proportional (cap $${f.sizing.amount})`;
       const tpslText = `${f.tpPct ? `TP +${f.tpPct}%` : 'No TP'} · ${f.slPct ? `SL −${f.slPct}%` : 'No SL'}`;
       const activeExitCount = Object.values(f.exitRules || {}).filter((r) => r && r.enabled).length;
-      const openCount = engineState.positions.filter((p) => p.followId === f.id && p.remainingTokens > 0 && (dateFilterState.preset === 'all' || inDateFilter(p.openedAt))).length;
+      const openCount = engineState.positions.filter((p) => (p.followId === f.id || (f.traderWallet && p.traderWallet === f.traderWallet)) && p.remainingTokens > 0 && (dateFilterState.preset === 'all' || inDateFilter(p.openedAt))).length;
       const histCount = engineState.history.filter((h) => (h.followId === f.id || traderWalletOf(h) === f.traderWallet) && inDateFilter(h.timestamp)).length;
       const sigCount = (liveWatch?.signals || []).filter((x) => x.wallet === f.traderWallet && !x.backfill && inDateFilter(x.blockTime || x.detectedAt)).length;
       const sc = traderScoreForFilter(f);

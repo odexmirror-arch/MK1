@@ -10,7 +10,7 @@ import { serializeEngine, restoreEngine } from '../engine/persistence.mjs';
 
 CHAINS.solana.nativePriceUsd = 100;
 const DECU = '4vw54BmAogeRV3vPKWyFet5yf8DTLcREzdSzx4rw9Ud9';
-const NOW = Date.UTC(2026, 9, 26, 20, 0, 0);
+const NOW = Date.now();
 const min = (m) => NOW - m * 60_000;
 
 function world() {
@@ -75,12 +75,13 @@ test('DX1 Dax finds the exit overshoot, the shake-out, the skipped winner, low w
 });
 
 test('DX2 period presets and an empty period', () => {
-  assert.equal(daxPeriod('7d', NOW).from, NOW - 7 * 86400000);
-  assert.equal(daxPeriod('today', NOW).from, Date.UTC(2026, 9, 26));
-  assert.equal(daxPeriod('nonsense', NOW).preset, '24h');
+  const fixedNow = Date.UTC(2026, 9, 26, 20, 0, 0);
+  assert.equal(daxPeriod('7d', fixedNow).from, fixedNow - 7 * 86400000);
+  assert.equal(daxPeriod('today', fixedNow).from, Date.UTC(2026, 9, 26));
+  assert.equal(daxPeriod('nonsense', fixedNow).preset, '24h');
   const e = new CopyTradingEngine();
   e.resetToCleanState();
-  const r = buildDaxReport({ engine: e }, { period: '24h', now: NOW });
+  const r = buildDaxReport({ engine: e }, { period: '24h', now: fixedNow });
   assert.match(r.findings[0].text, /No trades closed/);
   assert.ok(r.markdown.startsWith('# Dax report — Last 24 hours'));
 });

@@ -1166,6 +1166,14 @@ export class SolanaWalletWatcher {
       freezeAuthority: info?.authorityKnown ? info.freezeAuthority ?? null : null,
       venue: swap.venue || null,
       poolQuoteAmount: swap.poolQuoteAmount ?? null,
+      curve:
+        swap.curve && Number(swap.curve.virtualSolReserves) > 0 && Number(swap.curve.virtualTokenReserves) > 0
+          ? {
+              virtualSolReserves: Number(swap.curve.virtualSolReserves),
+              virtualTokenReserves: Number(swap.curve.virtualTokenReserves),
+              realTokenReserves: Number(swap.curve.realTokenReserves) || 0,
+            }
+          : null,
       signature: sig,
       explorerUrl: `https://solscan.io/tx/${sig}`,
       blockTime: swap.blockTime,

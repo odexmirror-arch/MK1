@@ -242,6 +242,7 @@ export class LiveSignalService {
         imageUrl: sig.imageUrl || null,
         createdAt: sig.pairCreatedAt || null,
         venue: sig.venue || null,
+        curve: sig.curve || null,
         // Freeze / mint authority come from Alchemy token metadata when available
         safety: sig.authorityKnown
           ? { safetyVerified: true, freezeAuthority: Boolean(sig.freezeAuthority), mintAuthority: Boolean(sig.mintAuthority) }

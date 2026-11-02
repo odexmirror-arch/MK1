@@ -207,6 +207,7 @@ test('PnL figures agree: period summary = calendar = sum of closed trades; parti
 test('paper mode matches real-SOL execution delay and post-delay curve price on both buy and trader sell', async () => {
   const { e, f } = setup();
   f.mode = 'mirror';
+  f.maxChasePct = 35; // allow +28.55% post-delay curve spike in this test
   const mint = 'SnowmeiMint1111111111111111111111111111pump';
   e.adapter.paperDelayMs = () => 60;
   let liveCurvePrice = 0.00000815; // spiked while waiting 60 ms on buy
@@ -240,4 +241,22 @@ test('paper mode matches real-SOL execution delay and post-delay curve price on 
   assert.equal(e.history[0].fillPriceUsd, 0.00000532, 'paper sell filled at post-dump curve price');
   assert.ok(pos.realizedPnlUsd < 0, 'paper mode records the same loss as real SOL when whale dumps a micro-curve');
 });
+
+test('paper mode enforces maxChasePct ceiling when post-delay live curve price spikes past the limit', async () => {
+  const { e, f } = setup();
+  f.maxChasePct = 20;
+  const mint = 'SpikedMint11111111111111111111111111111pump';
+  e.adapter.paperDelayMs = () => 10;
+  e.adapter.paperLiveFillPrice = async ({ side, fillPriceUsd }) =>
+    side === 'buy' ? Math.max(fillPriceUsd, 0.0000095) : fillPriceUsd; // +49.8% above trader's 0.00000634
+
+  const [res] = await e.processTraderSignal({
+    ...sig(f, { address: mint, traderFillPriceUsd: 0.00000634, currentPriceUsd: 0.00000634 }),
+    traderBuyNative: 1.5,
+  });
+  assert.equal(res.status, 'skipped', 'paper buy skipped when post-delay curve price exceeds maxChasePct');
+  assert.match(res.reason, /price moved too far before we could copy/);
+  assert.equal(e.positions.length, 0, 'no paper position opened above maxChasePct ceiling');
+});
+
 

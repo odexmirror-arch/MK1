@@ -5185,15 +5185,51 @@ body { padding-bottom: 40px; }
   border-radius: 13px;
 }
 
-/* trader cards: same faint card as History's table band */
-#term-follows .follow-card {
-  border: 1px solid rgba(255, 255, 255, 0.035) !important;
-  background: rgba(255, 255, 255, 0.012) !important;
-  border-radius: 16px !important;
+/* trader cards: separate header bar + compact, optimized trader card border */
+#term-follows > .card {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  padding: 0 !important;
+  margin-bottom: 0 !important;
 }
-#term-follows .follow-card:hover { border-color: rgba(255, 255, 255, 0.06) !important; }
-#term-follows .follow-meta-grid { border-color: rgba(255, 255, 255, 0.03) !important; background: rgba(255, 255, 255, 0.025) !important; }
-#term-follows .follow-meta-grid .meta-item { background: #131319 !important; }
+#term-follows > .card::before,
+#term-follows > .card::after {
+  display: none !important;
+  content: none !important;
+}
+#term-follows .card-header {
+  padding: 11px 16px !important;
+  margin-bottom: 12px !important;
+  border-radius: 14px !important;
+  border: 1px solid rgba(255, 255, 255, 0.055) !important;
+  background: var(--card) !important;
+}
+#term-follows .follow-card {
+  border: 1px solid rgba(255, 255, 255, 0.055) !important;
+  background: var(--card) !important;
+  border-radius: 14px !important;
+  padding: 12px 15px !important;
+  margin-bottom: 10px !important;
+}
+#term-follows .follow-card:hover { border-color: rgba(255, 255, 255, 0.09) !important; }
+#term-follows .follow-head { margin-bottom: 10px !important; gap: 10px !important; }
+#term-follows .follow-identity { gap: 10px !important; }
+#term-follows .follow-name { font-size: 14px !important; }
+#term-follows .follow-sub { font-size: 11px !important; margin-top: 1px !important; }
+#term-follows .follow-meta-grid { border-color: rgba(255, 255, 255, 0.03) !important; background: rgba(255, 255, 255, 0.025) !important; border-radius: 10px !important; }
+#term-follows .follow-meta-grid .meta-item { background: #131319 !important; padding: 7px 11px !important; }
+#term-follows .follow-meta-grid .meta-item span { font-size: 9.5px !important; margin-bottom: 2px !important; }
+#term-follows .follow-meta-grid .meta-item strong { font-size: 11.5px !important; }
+#term-follows .trader-score { margin-top: 8px !important; padding: 9px 12px !important; border-radius: 10px !important; }
+#term-follows .score-head { font-size: 10.5px !important; }
+#term-follows .score-verdict { font-size: 11px !important; }
+#term-follows .score-grid { gap: 8px !important; margin-top: 7px !important; }
+#term-follows .score-item span { font-size: 10px !important; }
+#term-follows .score-item strong { font-size: 13px !important; }
+#term-follows .score-item em { font-size: 10px !important; }
+#term-follows .follow-links { margin-top: 9px !important; padding-top: 9px !important; gap: 6px !important; }
+#term-follows .link-chip { padding: 4px 10px !important; font-size: 11.5px !important; }
 #term-follows .card-header .pill-soft, #term-follows .count-pill { border-color: transparent !important; }
 
 /* ===== v23 toasts without side stripe; status bar issues panel ===== */

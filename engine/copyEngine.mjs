@@ -836,15 +836,29 @@ export class CopyTradingEngine {
     let quoteToken = paper ? this.paperBuyPriceFloor(follow.chainId, token) : token;
     // pump.fun bonding curve: fill where a copy really lands — after the trader's own buy moved
     // the curve, plus our buy's own move — instead of a flat impact estimate
-    if (paper && follow.chainId === 'solana' && (/pump$/i.test(String(token.address || '')) || token.venue === 'pumpfun') && signal.traderBuyNative > 0) {
+    if (paper && follow.chainId === 'solana' && (/pump$/i.test(String(token.address || '')) || token.venue === 'pumpfun') && (signal.traderBuyNative > 0 || (Number(token.curve?.virtualSolReserves) > 0 && Number(token.curve?.virtualTokenReserves) > 0))) {
       const solPx = CHAINS.solana.nativePriceUsd;
       const feePct = solanaTradeFeePct(token).totalPct;
-      const c = pumpCurveCopyFill({
-        traderPriceUsd: token.traderFillPriceUsd,
-        traderSol: signal.traderPoolSol > 0 ? signal.traderPoolSol : signal.traderBuyNative,
-        ourSol: (desiredUsd * (1 - feePct / 100)) / solPx,
-        solPriceUsd: solPx,
-      });
+      const ourSol = (desiredUsd * (1 - feePct / 100)) / solPx;
+      let c = null;
+      if (Number(token.curve?.virtualSolReserves) > 0 && Number(token.curve?.virtualTokenReserves) > 0 && solPx > 0 && ourSol > 0) {
+        const vSol = Number(token.curve.virtualSolReserves) / 1e9;
+        const vTok = Number(token.curve.virtualTokenReserves) / 1e6;
+        if (vSol > 0 && vTok > 0) {
+          c = {
+            postTraderPriceUsd: (vSol / vTok) * solPx,
+            fillPriceUsd: ((vSol + ourSol) / vTok) * solPx,
+          };
+        }
+      }
+      if (!c && signal.traderBuyNative > 0) {
+        c = pumpCurveCopyFill({
+          traderPriceUsd: token.traderFillPriceUsd,
+          traderSol: signal.traderPoolSol > 0 ? signal.traderPoolSol : signal.traderBuyNative,
+          ourSol,
+          solPriceUsd: solPx,
+        });
+      }
       if (c) {
         // our own copies in the last 30 s already pushed the curve further: never below them
         const ownFloor = Number(quoteToken.currentPriceUsd) > c.postTraderPriceUsd ? Number(quoteToken.currentPriceUsd) / c.postTraderPriceUsd : 1;
@@ -982,6 +996,23 @@ export class CopyTradingEngine {
       });
       this.emit('alerts_updated', {});
       return this.recordSkip({ dryRun, follow, wallet, signal, reason: `real buy failed: ${why}` });
+    }
+
+    // Paper buys also enforce maxChase as a hard price ceiling after the simulated execution delay
+    // (`paperDelayMs` + `paperLiveFillPrice`), matching Real SOL's `minTokensOut` ceiling protection.
+    if (paper && traderFillPrice > 0 && maxChase < 1000 && Number(execResult?.fillPriceUsd) > 0) {
+      const fillChaseGapPct = ((Number(execResult.fillPriceUsd) - traderFillPrice) / traderFillPrice) * 100;
+      if (fillChaseGapPct > maxChase + 1e-6) {
+        if (!dryRun) this.markCopiedCycle(follow.id, token.address, 'missed');
+        return this.recordSkip({
+          dryRun,
+          follow,
+          wallet,
+          signal,
+          reason: `price moved too far before we could copy — the fill would land more than your ${maxChase}% max chase above the trader's price`,
+          chaseGapPct: Number(fillChaseGapPct.toFixed(2)),
+        });
+      }
     }
 
     // Real fills report exactly what was spent and received; paper fills are modelled
@@ -1965,17 +1996,20 @@ export class CopyTradingEngine {
     const avg = (a) => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : null);
     const follow = (this.follows || []).find((f) => f.id === followId);
     const wallet = follow?.traderWallet || null;
+    const posById = wallet ? new Map((this.positions || []).map((p) => [p.id, p])) : null;
     const start = Math.max(Number(since) || 0, Number(from) || 0);
     const end = to > 0 ? Number(to) : Infinity;
-    const rows = (this.realizedLog || []).filter(
-      (r) =>
-        (r.fid === followId || (wallet && r.wallet && r.wallet === wallet)) &&
+    const rows = (this.realizedLog || []).filter((r) => {
+      const rWallet = r.wallet || (r.pid && posById?.get(r.pid)?.traderWallet) || null;
+      return (
+        (r.fid === followId || (wallet && rWallet === wallet)) &&
         (r.closes === undefined || r.closes) &&
         Boolean(r.paper) === Boolean(paper) &&
         Number.isFinite(r.t) &&
         r.t >= start &&
         r.t <= end
-    );
+      );
+    });
     const pnls = rows.map((r) => (Number.isFinite(r.posPnl) ? r.posPnl : r.pnl)).filter(Number.isFinite);
     const wins = pnls.filter((p) => p > 0).length;
     const losses = pnls.filter((p) => p < 0).length;
@@ -2021,18 +2055,25 @@ export class CopyTradingEngine {
       if (!r.pid) continue;
       const p = byId.get(r.pid);
       if (!p) continue;
-      if (!r.wallet && p.traderWallet) r.wallet = p.traderWallet;
-      if (r.fid || !p.followId) continue;
-      r.fid = p.followId;
+      let touched = false;
+      if (!r.wallet && p.traderWallet) {
+        r.wallet = p.traderWallet;
+        touched = true;
+      }
+      if (!r.fid && p.followId) {
+        r.fid = p.followId;
+        touched = true;
+      }
       if (r.closes && r.held === undefined) {
-        const buy = this.history.find((h) => h.side === 'buy' && h.status === 'filled' && h.tokenAddress === p.tokenAddress && h.followId === p.followId && Math.abs((h.timestamp || 0) - (p.openedAt || 0)) < 120_000);
+        const buy = this.history.find((h) => h.side === 'buy' && h.status === 'filled' && h.tokenAddress === p.tokenAddress && (h.followId === p.followId || (p.traderWallet && h.traderWallet === p.traderWallet)) && Math.abs((h.timestamp || 0) - (p.openedAt || 0)) < 120_000);
         const trader = Number(p.traderEntryPriceUsd || buy?.traderPriceUsd) || 0;
         r.held = p.closedAt && p.openedAt ? Math.max(0, Math.round((p.closedAt - p.openedAt) / 1000)) : null;
         r.slipIn = Number.isFinite(p.entrySlipPct) ? p.entrySlipPct : trader > 0 && p.entryPriceUsd > 0 ? Number(((p.entryPriceUsd / trader - 1) * 100).toFixed(2)) : null;
         r.slipOut = Number.isFinite(p.exitSlipPct) ? p.exitSlipPct : null;
         r.lag = Number.isFinite(p.detectLagSec) ? p.detectLagSec : null;
+        touched = true;
       }
-      filled += 1;
+      if (touched) filled += 1;
     }
     return filled;
   }

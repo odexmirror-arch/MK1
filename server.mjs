@@ -80,13 +80,15 @@ export const supabase = new SupabaseMirror({
   table: process.env.SUPABASE_TABLE || 'odex_kv',
 });
 export const persistence = db ? new PersistenceManager({ engine, live: liveSignals, store: db, cloud: supabase }) : null;
-// Fresh install / empty local database: restore from Supabase first
-if (persistence && supabase.enabled && !db.get('engine')) {
+// Fresh install or newer cloud state (e.g. Railway active while opening localhost): restore from Supabase first
+if (persistence && supabase.enabled) {
   try {
+    const localEngine = db.get('engine');
     const rows = await supabase.pullAll();
-    if (rows.get('engine')) {
+    const remoteEngine = rows.get('engine');
+    if (remoteEngine && (!localEngine || (Number(remoteEngine.savedAt) || 0) > (Number(localEngine.savedAt) || 0))) {
       db.setMany([...rows.entries()].filter(([k]) => k === 'engine' || k === 'liveSignals' || k === 'realTrader' || k === 'daxChat'));
-      console.log('Database: restored from Supabase (local database was empty)');
+      console.log(`Database: restored from Supabase (${localEngine ? 'cloud state was newer than local' : 'local database was empty'})`);
     }
   } catch (err) {
     console.log(`Supabase: could not restore on startup (${err.message})`);

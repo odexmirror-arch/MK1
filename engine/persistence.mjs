@@ -45,6 +45,21 @@ export function restoreEngine(engine, data) {
         f.decuV2Migrated = true;
         f.decuV3Migrated = true;
       }
+      if ((f.id === 'fol-03782071' || f.traderWallet === '4vw54BmAogeRV3vPKWyFet5yf8DTLcREzdSzx4rw9Ud9') && !f.decuV4Migrated) {
+        f.mode = 'auto-exit';
+        f.mirrorSells = true;
+        const baseRules = followTraderExitRules();
+        f.exitRules = {
+          ...baseRules,
+          takeInitials: { ...baseRules.takeInitials, enabled: true, takeAtPct: 10, sellSizePct: 100 },
+          floor: { ...baseRules.floor, enabled: true, openingFloorPct: 20, tightensAfterSec: 3600, tightFloorPct: 20 },
+        };
+        f.copyTopUps = false;
+        f.reentryCooldownMin = 10;
+        f.maxChasePct = 20;
+        f.filtersOverride = { ...(f.filtersOverride || {}), minTraderBuyNative: 0.5 };
+        f.decuV4Migrated = true;
+      }
     }
   }
   if (Array.isArray(data.positions)) engine.positions = data.positions;
@@ -70,9 +85,20 @@ export function restoreEngine(engine, data) {
     }
     // real-copy age limit: the first version saved 20 s as its default; the limit is now 10 s
     if (merged.maxRealSignalAgeSec === 20) merged.maxRealSignalAgeSec = 10;
+    const hasDecu = engine.follows.some((f) => f.id === 'fol-03782071' || f.traderWallet === '4vw54BmAogeRV3vPKWyFet5yf8DTLcREzdSzx4rw9Ud9');
+    if (hasDecu && !merged.decuV4SettingsMigrated) {
+      merged.maxChasePct = 20;
+      merged.risk = { ...(merged.risk || {}), streakLimit: 3 };
+      const mainWallet = engine.wallets.find((w) => w.id === 'w-main') || engine.wallets[0];
+      if (mainWallet && Number(mainWallet.paperBalanceUsd) < 30) {
+        mainWallet.paperBalanceUsd = 400;
+      }
+      merged.decuV4SettingsMigrated = true;
+    }
     engine.settings = merged;
   }
   if (Array.isArray(data.buyCooldown)) engine.buyCooldownMap = new Map(data.buyCooldown);
+  engine.backfillScorecardLog?.();
   return {
     follows: engine.follows.length,
     openPositions: engine.positions.filter((p) => p.remainingTokens > 0).length,
