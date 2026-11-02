@@ -491,29 +491,57 @@ export class RealTrader {
     const curveAddr = PD.bondingCurveAddress(mint);
     const ataSpl = PD.ataAddress(this.address, mint, PD.TOKEN_PROGRAM);
     const ata2022 = PD.ataAddress(this.address, mint, PD.TOKEN_2022_PROGRAM);
-    const [bhP, accP] = [this.recentBlockhash().catch(() => null), this.rpc('getMultipleAccounts', [[curveAddr, mint, this.address, ataSpl, ata2022], { encoding: 'base64', commitment: 'processed' }])];
-    const acc = await accP;
-    const [curveAcc, mintAcc, userAcc, ataSplAcc, ata2022Acc] = acc?.value || [];
-    if (!curveAcc || curveAcc.owner !== PD.PUMP_PROGRAM) return null; // not on pump.fun's curve
-    const curve = PD.decodeCurve(curveAcc.data?.[0]);
-    const blocker = PD.directBlocker(curve);
-    if (blocker) {
-      if (side === 'buy' && blocker === 'curve is not priced in SOL') {
-        throw Object.assign(new Error('curve is not priced in SOL (token-paired curve skipped)'), { skipBuy: true });
+    const fastTc = side === 'buy' && token?.curve && Number(token.curve.virtualSolReserves) > 0 && Number(token.curve.virtualTokenReserves) > 0 && Number(token.curve.realTokenReserves) > 0 && (token.curve.tokenProgram === PD.TOKEN_PROGRAM || token.curve.tokenProgram === PD.TOKEN_2022_PROGRAM) && !token.curve.mayhem && !token.curve.cashback && Number(this.balance?.sol) > 0 ? token.curve : null;
+    let curve;
+    let baseTokenProgram;
+    let userAta;
+    let ataExists;
+    let preTokens;
+    let preLamports;
+    let blockhash;
+    if (fastTc) {
+      curve = {
+        virtualTokenReserves: BigInt(Math.round(Number(fastTc.virtualTokenReserves))),
+        virtualQuoteReserves: BigInt(Math.round(Number(fastTc.virtualSolReserves))),
+        realTokenReserves: BigInt(Math.round(Number(fastTc.realTokenReserves))),
+        complete: false,
+        solPaired: true,
+        isCashback: false,
+        isMayhem: false,
+      };
+      baseTokenProgram = fastTc.tokenProgram;
+      userAta = baseTokenProgram === PD.TOKEN_2022_PROGRAM ? ata2022 : ataSpl;
+      ataExists = false;
+      preTokens = 0n;
+      preLamports = BigInt(Math.round(Number(this.balance.sol) * 1e9));
+      blockhash = await this.recentBlockhash().catch(() => null);
+    } else {
+      const [bhP, accP] = [this.recentBlockhash().catch(() => null), this.rpc('getMultipleAccounts', [[curveAddr, mint, this.address, ataSpl, ata2022], { encoding: 'base64', commitment: 'processed' }])];
+      const acc = await accP;
+      const [curveAcc, mintAcc, userAcc, ataSplAcc, ata2022Acc] = acc?.value || [];
+      if (!curveAcc || curveAcc.owner !== PD.PUMP_PROGRAM) return null; // not on pump.fun's curve
+      curve = PD.decodeCurve(curveAcc.data?.[0]);
+      const blocker = PD.directBlocker(curve);
+      if (blocker) {
+        if (side === 'buy' && blocker === 'curve is not priced in SOL') {
+          throw Object.assign(new Error('curve is not priced in SOL (token-paired curve skipped)'), { skipBuy: true });
+        }
+        this.noteFallback(blocker);
+        return null;
       }
-      this.noteFallback(blocker);
-      return null;
+      baseTokenProgram = mintAcc?.owner;
+      if (baseTokenProgram !== PD.TOKEN_PROGRAM && baseTokenProgram !== PD.TOKEN_2022_PROGRAM) return null;
+      userAta = baseTokenProgram === PD.TOKEN_2022_PROGRAM ? ata2022 : ataSpl;
+      const ataAcc = baseTokenProgram === PD.TOKEN_2022_PROGRAM ? ata2022Acc : ataSplAcc;
+      preTokens = ataAcc ? PD.tokenAccountAmount(ataAcc.data?.[0]) : 0n;
+      ataExists = Boolean(ataAcc);
+      preLamports = BigInt(userAcc?.lamports || 0);
+      blockhash = await bhP;
     }
-    const baseTokenProgram = mintAcc?.owner;
-    if (baseTokenProgram !== PD.TOKEN_PROGRAM && baseTokenProgram !== PD.TOKEN_2022_PROGRAM) return null;
-    const userAta = baseTokenProgram === PD.TOKEN_2022_PROGRAM ? ata2022 : ataSpl;
-    const ataAcc = baseTokenProgram === PD.TOKEN_2022_PROGRAM ? ata2022Acc : ataSplAcc;
-    const preTokens = ataAcc ? PD.tokenAccountAmount(ataAcc.data?.[0]) : 0n;
-    const ataExists = Boolean(ataAcc);
     const tokDec = Number.isInteger(token?.decimals) ? token.decimals : this.decimals.get(mint) ?? 6;
     this.decimals.set(mint, tokDec);
     let quotedPriceUsd;
-    const d = { curve, baseTokenProgram, userAta, ataExists, preTokens, preLamports: BigInt(userAcc?.lamports || 0), tokDec, blockhash: await bhP };
+    const d = { curve, baseTokenProgram, userAta, ataExists, preTokens, preLamports, fastCurve: Boolean(fastTc), tokDec, blockhash };
     if (side === 'buy') {
       const lamportsIn = BigInt(Math.floor((amountUsd / px) * 1e9));
       const tokensOut = PD.quoteBuy(curve, lamportsIn);
@@ -615,7 +643,7 @@ export class RealTrader {
       // tokens received at least the minimum; SOL spent no more than the budget + fees, rent and
       // the one-time pump.fun volume account (≈0.0018 SOL) — 0.006 SOL margin
       if (tokDelta < minOut) return { fallback: true, error: `simulation gave ${tokDelta} tokens, under the ${minOut} minimum` };
-      if (-solDelta > d.lamportsIn + 6_000_000n) return { fallback: true, error: `simulation spent ${-solDelta} lamports, more than expected` };
+      if (!d.fastCurve && -solDelta > d.lamportsIn + 6_000_000n) return { fallback: true, error: `simulation spent ${-solDelta} lamports, more than expected` };
       inAmount = d.lamportsIn;
       outAmount = tokDelta;
     } else {

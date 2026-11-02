@@ -869,9 +869,30 @@ export class CopyTradingEngine {
     // Pre-cap slippage before the first quote when the known market/curve price has already moved
     // above the trader's fill price, avoiding a second round-trip quote to Jupiter.
     const maxChasePre = this.maxChaseFor(follow);
-    if (real && Number(token.traderFillPriceUsd) > 0 && maxChasePre < 1000 && Number(token.currentPriceUsd) > Number(token.traderFillPriceUsd) * 1.005) {
+    if (real && follow.chainId === 'solana' && Number(token.traderFillPriceUsd) > 0 && maxChasePre < 1000 && Number(token.curve?.virtualSolReserves) > 0 && Number(token.curve?.virtualTokenReserves) > 0) {
+      const solPxPre = Number(CHAINS.solana?.nativePriceUsd) || 0;
+      const vSolPre = Number(token.curve.virtualSolReserves) / 1e9;
+      const vTokPre = Number(token.curve.virtualTokenReserves) / 1e6;
+      if (solPxPre > 0 && vSolPre > 0 && vTokPre > 0) {
+        const postTraderPxUsd = (vSolPre / vTokPre) * solPxPre;
+        const preGapPct = ((postTraderPxUsd - Number(token.traderFillPriceUsd)) / Number(token.traderFillPriceUsd)) * 100;
+        if (preGapPct > maxChasePre) {
+          if (!dryRun) this.markCopiedCycle(follow.id, token.address, 'missed');
+          return this.recordSkip({
+            dryRun,
+            follow,
+            wallet,
+            signal,
+            reason: 'price moved too far before we could copy',
+            chaseGapPct: Number(preGapPct.toFixed(2)),
+          });
+        }
+        quoteToken = { ...quoteToken, currentPriceUsd: Math.max(Number(quoteToken.currentPriceUsd) || 0, postTraderPxUsd) };
+      }
+    }
+    if (real && Number(token.traderFillPriceUsd) > 0 && maxChasePre < 1000 && Number(quoteToken.currentPriceUsd) > Number(token.traderFillPriceUsd) * 1.005) {
       const ceilingPre = Number(token.traderFillPriceUsd) * (1 + maxChasePre / 100);
-      const roomPre = (1 - Number(token.currentPriceUsd) / ceilingPre) * 100;
+      const roomPre = (1 - Number(quoteToken.currentPriceUsd) / ceilingPre) * 100;
       if (roomPre >= 0.5 && roomPre < buySlippagePct) {
         buySlippagePct = Math.max(0.5, Math.floor(roomPre * 10) / 10);
       }
@@ -1548,12 +1569,14 @@ export class CopyTradingEngine {
     if (follow) {
       if (realizedPnlUsd < 0) {
         follow.consecutiveLosses = (follow.consecutiveLosses || 0) + 1;
+        const streakLimit = Number(follow.streakLimit) >= 2 ? Number(follow.streakLimit) : this.settings.risk.streakLimit;
         if (
-          this.settings.risk.streakLimit !== null &&
-          follow.consecutiveLosses >= this.settings.risk.streakLimit
+          streakLimit !== null &&
+          follow.consecutiveLosses >= streakLimit
         ) {
           follow.status = 'paused';
           follow.pauseReason = 'streak';
+          follow.streakPausedAt = Date.now();
           this.alerts.unshift({
             id: `alt-${randomUUID().slice(0, 8)}`,
             level: 'danger',

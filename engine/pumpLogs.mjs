@@ -114,8 +114,9 @@ export function decodeTradeEvent(body) {
     ev.ixName = r.string();
     if (r.left() > 0) {
       ev.mayhem = r.bool();
-      r.u64(); // cashback_fee_basis_points
-      r.u64(); // cashback
+      const cbBps = r.u64(); // cashback_fee_basis_points
+      const cbAmt = r.u64(); // cashback
+      ev.cashback = cbBps > 0n || cbAmt > 0n;
       r.u64(); // buyback_fee_basis_points
       r.u64(); // buyback_fee
       const n = r.u32(); // shareholders
@@ -145,6 +146,7 @@ export function pumpTradeFromLogs(logs, trader, { err = null } = {}) {
   const stack = [];
   const trades = [];
   let complete = false;
+  let seenTokenProgram = null;
   for (const raw of logs) {
     const line = String(raw);
     if (/^Log truncated/i.test(line)) return { skip: 'logs truncated' };
@@ -152,6 +154,9 @@ export function pumpTradeFromLogs(logs, trader, { err = null } = {}) {
     if (m) {
       const depth = Number(m[2]);
       if (depth !== stack.length + 1) return { skip: 'invoke stack out of order' };
+      if (stack.includes(PUMP_PROGRAM) && (m[1] === 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb' || m[1] === 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA')) {
+        if (m[1] === 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb' || !seenTokenProgram) seenTokenProgram = m[1];
+      }
       stack.push(m[1]);
       continue;
     }
@@ -201,6 +206,7 @@ export function pumpTradeFromLogs(logs, trader, { err = null } = {}) {
   const t = trades[0];
   if (t.quoteMint !== WSOL_MINT) return { skip: 'coin not priced in SOL' };
   if (t.solAmount <= 0n || t.tokenAmount <= 0n) return { skip: 'empty trade' };
+  if (seenTokenProgram && !t.tokenProgram) t.tokenProgram = seenTokenProgram;
   return { trade: t };
 }
 
@@ -239,6 +245,13 @@ export function swapFromPumpTrade(t, { signature, slot = null, heldAfterRaw = nu
     blockTime: Number(t.timestamp) > 0 ? Math.min(receivedAt, Number(t.timestamp) * 1000) : receivedAt,
     venue: t.program && t.program !== PUMP_PROGRAM ? 'pumpswap' : 'pumpfun',
     fastDetect: true,
-    curve: { virtualSolReserves: t.virtualSolReserves, virtualTokenReserves: t.virtualTokenReserves, realTokenReserves: t.realTokenReserves },
+    curve: {
+      virtualSolReserves: t.virtualSolReserves,
+      virtualTokenReserves: t.virtualTokenReserves,
+      realTokenReserves: t.realTokenReserves,
+      mayhem: Boolean(t.mayhem),
+      cashback: Boolean(t.cashback),
+      tokenProgram: t.tokenProgram || null,
+    },
   };
 }

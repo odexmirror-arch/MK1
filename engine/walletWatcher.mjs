@@ -1172,6 +1172,9 @@ export class SolanaWalletWatcher {
               virtualSolReserves: Number(swap.curve.virtualSolReserves),
               virtualTokenReserves: Number(swap.curve.virtualTokenReserves),
               realTokenReserves: Number(swap.curve.realTokenReserves) || 0,
+              mayhem: Boolean(swap.curve.mayhem),
+              cashback: Boolean(swap.curve.cashback),
+              tokenProgram: swap.curve.tokenProgram || null,
             }
           : null,
       signature: sig,

@@ -483,9 +483,38 @@ test('PD20 non-SOL-paired pump.fun curve skips BUY immediately without falling b
   assert.equal(w.sent.length, 0);
 
   // Sells on non-SOL-paired curves still fall back to Jupiter so existing holdings can always exit
-  await assert.rejects(trader.quote({ side: 'sell', token, tokenAmount: 'all', slippagePct: 15 }));
+  await assert.rejects(trader.quote({ side: 'sell', token, amountUsd: 10, tokenAmount: 'all', slippagePct: 15 }));
   assert.ok(w.jupiterOrders >= 1, 'sell falls back to Jupiter');
 });
+
+test('PD21 Yellowstone gRPC TradeEvent curve reserves skip getMultipleAccounts RPC call on direct buy', async () => {
+  const { trader, token } = world();
+  trader.balance = { sol: 5, usdc: 0 };
+  await trader.refreshBlockhash();
+  const calls = [];
+  const origRpc = trader.rpc;
+  trader.rpc = async (method, params) => {
+    calls.push(method);
+    return origRpc(method, params);
+  };
+  const fastToken = {
+    ...token,
+    curve: {
+      virtualSolReserves: 30_000_000_000,
+      virtualTokenReserves: 1_073_000_000_000_000,
+      realTokenReserves: 793_100_000_000_000,
+      mayhem: false,
+      cashback: false,
+      tokenProgram: PD.TOKEN_PROGRAM,
+    },
+  };
+  const q = await trader.quote({ side: 'buy', token: fastToken, amountUsd: 10, slippagePct: 10 });
+  assert.equal(q.route, 'direct');
+  assert.equal(calls.length, 0, `zero RPC calls during directQuote when Yellowstone curve + cached blockhash are warm: ${calls.join(', ')}`);
+  const r = await trader.execute({ side: 'buy', token: fastToken, amountUsd: 10, quote: q, slippagePct: 10 });
+  assert.equal(r.ok, true, r.error);
+});
+
 
 
 
