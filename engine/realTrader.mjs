@@ -617,15 +617,31 @@ export class RealTrader {
     } catch (err) {
       return { fallback: true, error: `sign: ${err.message}` };
     }
-    // ----- simulate and check the balance changes before sending anything -----
+    // ----- fastCurve buy: blast + send in parallel with simulation (on-chain minTokensOut enforces ceiling) -----
+    let fastSent = false;
+    let fastSendStart = 0;
+    let fastSig = signed.signature;
+    let fastSendP = null;
+    if (d.fastCurve && side === 'buy') {
+      if (tooLate()) return { late: true, error: "too late to send — it would land past the late-copy limit after the trader's buy" };
+      if (!this.sentSigs) this.sentSigs = new Map();
+      for (const [k, t] of this.sentSigs) if (this.now() - t > 120_000) this.sentSigs.delete(k);
+      if (this.sentSigs.has(signed.signature)) return { fallback: true, error: 'identical transaction already sent — not sending it twice' };
+      this.sentSigs.set(signed.signature, this.now());
+      fastSent = true;
+      fastSendStart = this.now();
+      this.blastSignedTransaction(signed.base64);
+      fastSendP = this.rpc('sendTransaction', [signed.base64, { encoding: 'base64', skipPreflight: true, maxRetries: 3 }]).catch(() => null);
+    }
+    // ----- simulate and check the balance changes -----
     let sim;
     try {
       sim = await this.rpc('simulateTransaction', [signed.base64, { encoding: 'base64', commitment: 'processed', sigVerify: true, replaceRecentBlockhash: false, accounts: { encoding: 'base64', addresses: [this.address, d.userAta] } }]);
     } catch (err) {
-      return { fallback: true, error: `simulation: ${err.message}` };
+      if (!fastSent) return { fallback: true, error: `simulation: ${err.message}` };
     }
     const simErr = sim?.value?.err;
-    if (simErr) {
+    if (simErr && !fastSent) {
       const code = PD.customErrorCode(simErr);
       if (PRICE_CODES.has(code)) return { priceMoved: true, error: `pump.fun refused: price past the limit (${code})` };
       if (/BlockhashNotFound/i.test(JSON.stringify(simErr))) this.blockhashCache = null;
@@ -634,40 +650,46 @@ export class RealTrader {
     const post = sim?.value?.accounts || [];
     const postLamports = post[0] ? BigInt(post[0].lamports || 0) : null;
     const postTokens = post[1] ? PD.tokenAccountAmount(post[1].data?.[0]) : side === 'sell' ? 0n : null;
-    if (postLamports === null || postTokens === null) return { fallback: true, error: 'simulation returned no balances' };
-    const tokDelta = postTokens - d.preTokens;
-    const solDelta = postLamports - d.preLamports;
+    if (!fastSent && (postLamports === null || postTokens === null)) return { fallback: true, error: 'simulation returned no balances' };
+    const tokDelta = postTokens !== null ? postTokens - d.preTokens : minOut;
+    const solDelta = postLamports !== null ? postLamports - d.preLamports : 0n;
     let inAmount;
     let outAmount;
     if (side === 'buy') {
       // tokens received at least the minimum; SOL spent no more than the budget + fees, rent and
       // the one-time pump.fun volume account (≈0.0018 SOL) — 0.006 SOL margin
-      if (tokDelta < minOut) return { fallback: true, error: `simulation gave ${tokDelta} tokens, under the ${minOut} minimum` };
+      if (!fastSent && tokDelta < minOut) return { fallback: true, error: `simulation gave ${tokDelta} tokens, under the ${minOut} minimum` };
       if (!d.fastCurve && -solDelta > d.lamportsIn + 6_000_000n) return { fallback: true, error: `simulation spent ${-solDelta} lamports, more than expected` };
       inAmount = d.lamportsIn;
-      outAmount = tokDelta;
+      outAmount = tokDelta > 0n ? tokDelta : d.tokensOut;
     } else {
       if (-tokDelta !== d.amount) return { fallback: true, error: `simulation sold ${-tokDelta} tokens, expected ${d.amount}` };
       if (solDelta < minOut - 200_000n) return { fallback: true, error: `simulation returned ${solDelta} lamports, under the minimum` };
       inAmount = d.amount;
       outAmount = solDelta > 0n ? solDelta : 0n;
     }
-    // the simulation took time: still within the late-copy limit? (nothing sent → Jupiter is not tried either)
-    if (tooLate()) return { late: true, error: "too late to send — it would land past the late-copy limit after the trader's buy" };
-    // never send (or book) the same signature twice
-    if (!this.sentSigs) this.sentSigs = new Map();
-    for (const [k, t] of this.sentSigs) if (this.now() - t > 120_000) this.sentSigs.delete(k);
-    if (this.sentSigs.has(signed.signature)) return { fallback: true, error: 'identical transaction already sent — not sending it twice' };
-    this.sentSigs.set(signed.signature, this.now());
-    // ----- send (fast RPCs + main RPC in parallel) and confirm -----
-    const sendStart = this.now();
-    let sig = signed.signature;
-    this.blastSignedTransaction(signed.base64);
-    try {
-      const r = await this.rpc('sendTransaction', [signed.base64, { encoding: 'base64', skipPreflight: true, maxRetries: 3 }]);
+    let sendStart = fastSendStart;
+    let sig = fastSig;
+    if (fastSent) {
+      const r = await fastSendP;
       if (typeof r === 'string') sig = r;
-    } catch (err) {
-      // the fast RPCs above still got it; the status check decides
+    } else {
+      // the simulation took time: still within the late-copy limit? (nothing sent → Jupiter is not tried either)
+      if (tooLate()) return { late: true, error: "too late to send — it would land past the late-copy limit after the trader's buy" };
+      // never send (or book) the same signature twice
+      if (!this.sentSigs) this.sentSigs = new Map();
+      for (const [k, t] of this.sentSigs) if (this.now() - t > 120_000) this.sentSigs.delete(k);
+      if (this.sentSigs.has(signed.signature)) return { fallback: true, error: 'identical transaction already sent — not sending it twice' };
+      this.sentSigs.set(signed.signature, this.now());
+      // ----- send (fast RPCs + main RPC in parallel) and confirm -----
+      sendStart = this.now();
+      this.blastSignedTransaction(signed.base64);
+      try {
+        const r = await this.rpc('sendTransaction', [signed.base64, { encoding: 'base64', skipPreflight: true, maxRetries: 3 }]);
+        if (typeof r === 'string') sig = r;
+      } catch (err) {
+        // the fast RPCs above still got it; the status check decides
+      }
     }
     const st = await this.waitForSignature(sig, 25_000);
     const sendMs = this.now() - sendStart;

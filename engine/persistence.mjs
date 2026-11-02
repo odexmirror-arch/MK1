@@ -45,7 +45,7 @@ export function restoreEngine(engine, data) {
         f.decuV2Migrated = true;
         f.decuV3Migrated = true;
       }
-      if ((f.id === 'fol-03782071' || f.traderWallet === '4vw54BmAogeRV3vPKWyFet5yf8DTLcREzdSzx4rw9Ud9') && !f.decuV4Migrated) {
+      if ((f.id === 'fol-03782071' || f.traderWallet === '4vw54BmAogeRV3vPKWyFet5yf8DTLcREzdSzx4rw9Ud9') && !f.decuV5Migrated) {
         f.mode = 'auto-exit';
         f.mirrorSells = true;
         const baseRules = followTraderExitRules();
@@ -53,12 +53,14 @@ export function restoreEngine(engine, data) {
           ...baseRules,
           takeInitials: { ...baseRules.takeInitials, enabled: true, takeAtPct: 10, sellSizePct: 100 },
           floor: { ...baseRules.floor, enabled: true, openingFloorPct: 20, tightensAfterSec: 3600, tightFloorPct: 20 },
+          waveCut: { ...baseRules.waveCut, enabled: true, afterSec: 15, needsPeakPct: 2 },
         };
         f.copyTopUps = false;
         f.reentryCooldownMin = 10;
         f.maxChasePct = 20;
         f.filtersOverride = { ...(f.filtersOverride || {}), minTraderBuyNative: 0.5 };
         f.decuV4Migrated = true;
+        f.decuV5Migrated = true;
       }
     }
   }

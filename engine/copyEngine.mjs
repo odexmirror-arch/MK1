@@ -1726,7 +1726,9 @@ export class CopyTradingEngine {
       }
 
       if (rules.waveCut?.enabled) {
-        if (ageSec >= Number(rules.waveCut.afterSec) && peakGainPct < Number(rules.waveCut.needsPeakPct)) {
+        // Fast dead-entry scratch (afterSec <= 30) only exits when actively underwater (gainPct <= -4)
+        const deadEntryOk = Number(rules.waveCut.afterSec) > 30 || gainPct <= -4;
+        if (ageSec >= Number(rules.waveCut.afterSec) && peakGainPct < Number(rules.waveCut.needsPeakPct) && deadEntryOk) {
           return this.executePositionSell(pos.id, {
             sellPct: 100,
             cause: 'no-wave exit',
