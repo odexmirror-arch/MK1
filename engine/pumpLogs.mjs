@@ -137,6 +137,98 @@ export function decodeTradeEvent(body) {
 }
 
 /**
+ * Decode a Raydium LaunchLab (LanMV9sAd7wArD4vJFi2qDdfnVhFxYSUg6eADduJ3uj) 139-byte TradeEvent body
+ * (147 bytes including the 8-byte TRADE_EVENT discriminator).
+ */
+export function decodeLaunchLabTradeEvent(body) {
+  if (!body || body.length < 139) return null;
+  const r = reader(body);
+  const poolState = r.pubkey(); // 0..32
+  const totalBaseSell = r.u64(); // 32..40
+  const virtualBase = r.u64(); // 40..48
+  const virtualQuote = r.u64(); // 48..56
+  const realBaseBefore = r.u64(); // 56..64
+  const realQuoteBefore = r.u64(); // 64..72
+  const realBaseAfter = r.u64(); // 72..80
+  const realQuoteAfter = r.u64(); // 80..88
+  const amountIn = r.u64(); // 88..96
+  const amountOut = r.u64(); // 96..104
+  const protocolFee = r.u64(); // 104..112
+  const platformFee = r.u64(); // 112..120
+  const creatorFee = r.u64(); // 120..128
+  const shareFee = r.u64(); // 128..136
+  const tradeDirection = body[136]; // 0 = Buy, 1 = Sell
+  const poolStatus = body[137];
+  const exactIn = body[138] === 1;
+  if (!(virtualBase > realBaseAfter) || !(virtualQuote > 0n)) return null;
+  return {
+    poolState,
+    totalBaseSell,
+    virtualBase,
+    virtualQuote,
+    realBaseBefore,
+    realQuoteBefore,
+    realBaseAfter,
+    realQuoteAfter,
+    amountIn,
+    amountOut,
+    protocolFee,
+    platformFee,
+    creatorFee,
+    shareFee,
+    isBuy: tradeDirection === 0,
+    complete: poolStatus !== 0,
+    exactIn,
+    virtualTokenReserves: Number(virtualBase - realBaseAfter),
+    virtualSolReserves: Number(virtualQuote + realQuoteAfter),
+    realTokenReserves: Number(totalBaseSell > realBaseAfter ? totalBaseSell - realBaseAfter : virtualBase - realBaseAfter),
+    realSolReserves: Number(realQuoteAfter),
+    poolSolLamports: Number(realQuoteAfter > realQuoteBefore ? realQuoteAfter - realQuoteBefore : realQuoteBefore - realQuoteAfter),
+  };
+}
+
+/** Extract a verified Raydium LaunchLab TradeEvent from transaction logs (invoke-stack checked). */
+export function launchLabTradeFromLogs(logs) {
+  if (!Array.isArray(logs) || !logs.length) return null;
+  const stack = [];
+  const events = [];
+  for (const raw of logs) {
+    const line = String(raw);
+    if (/^Log truncated/i.test(line)) return null;
+    let m = INVOKE_RE.exec(line);
+    if (m) {
+      if (Number(m[2]) !== stack.length + 1) return null;
+      stack.push(m[1]);
+      continue;
+    }
+    m = END_RE.exec(line);
+    if (m) {
+      if (stack[stack.length - 1] !== m[1] || m[2] !== 'success') return null;
+      stack.pop();
+      continue;
+    }
+    m = DATA_RE.exec(line);
+    if (!m) continue;
+    if (stack[stack.length - 1] !== RAYDIUM_LAUNCHLAB_PROGRAM) continue;
+    let data;
+    try {
+      data = Buffer.from(m[1], 'base64');
+    } catch {
+      continue;
+    }
+    if (data.length === 147 && data.subarray(0, 8).equals(TRADE_EVENT)) {
+      try {
+        const ev = decodeLaunchLabTradeEvent(data.subarray(8));
+        if (ev && !ev.complete) events.push(ev);
+      } catch {
+        // ignore malformed
+      }
+    }
+  }
+  return events.length === 1 ? events[0] : null;
+}
+
+/**
  * The trader's pump.fun trade from pushed logs, or { skip: reason }.
  * Only returns a trade when exactly one genuine TradeEvent for `trader` is found.
  */

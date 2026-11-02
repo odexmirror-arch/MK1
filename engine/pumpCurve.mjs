@@ -35,6 +35,7 @@ export function parseLaunchLabPool(data) {
   const baseDecimals = b[18] || 6;
   const quoteDecimals = b[19] || 9;
   const supply = u64(21);
+  const totalBaseSell = u64(29);
   const virtualBase = u64(37);
   const virtualQuote = u64(45);
   const realBase = u64(53);
@@ -46,6 +47,7 @@ export function parseLaunchLabPool(data) {
     baseDecimals,
     quoteDecimals,
     supply,
+    totalBaseSell,
     virtualBase,
     virtualQuote,
     realBase,
@@ -67,6 +69,14 @@ export function launchLabMetrics(pool, solPriceUsd) {
     liquidityUsd: (pool.realQuote / 10 ** pool.quoteDecimals) * solPriceUsd * 2,
     complete: pool.complete,
     source: 'pump-curve',
+    curve: {
+      virtualTokenReserves: pool.virtualBase - pool.realBase,
+      virtualSolReserves: pool.virtualQuote + pool.realQuote,
+      realTokenReserves: Math.max(0, (pool.totalBaseSell || pool.virtualBase) - pool.realBase),
+      realSolReserves: pool.realQuote,
+      launchlab: true,
+      at: Date.now(),
+    },
   };
 }
 

@@ -72,6 +72,104 @@ export function pbFields(buf) {
 }
 const first = (fields, n) => fields.find((f) => f.field === n);
 
+function readRepeatedU64(fields, fieldNum) {
+  const out = [];
+  for (const f of fields) {
+    if (f.field !== fieldNum) continue;
+    if (f.wire === 0) out.push(Number(f.value));
+    else if (f.wire === 2 && Buffer.isBuffer(f.value)) {
+      let o = 0;
+      const b = f.value;
+      while (o < b.length) {
+        let r = 0n;
+        let shift = 0n;
+        for (;;) {
+          if (o >= b.length) break;
+          const byte = b[o++];
+          r |= BigInt(byte & 0x7f) << shift;
+          if (!(byte & 0x80)) break;
+          shift += 7n;
+        }
+        out.push(Number(r));
+      }
+    }
+  }
+  return out;
+}
+
+function decodeTokenBalance(buf) {
+  const tf = pbFields(buf);
+  const accIdx = first(tf, 1);
+  const mint = first(tf, 2);
+  const uiTok = first(tf, 3);
+  const owner = first(tf, 4);
+  if (!mint || !uiTok) return null;
+  const uf = pbFields(uiTok.value);
+  const uiAmt = first(uf, 1);
+  const dec = first(uf, 2);
+  const amtStr = first(uf, 3);
+  const uiAmtStr = first(uf, 4);
+  return {
+    accountIndex: accIdx ? Number(accIdx.value) : 0,
+    mint: mint.value.toString('utf8'),
+    owner: owner ? owner.value.toString('utf8') : null,
+    uiTokenAmount: {
+      amount: amtStr ? amtStr.value.toString('utf8') : '0',
+      decimals: dec ? Number(dec.value) : 0,
+      uiAmount: uiAmt && uiAmt.value.length === 8 ? uiAmt.value.readDoubleLE(0) : null,
+      uiAmountString: uiAmtStr ? uiAmtStr.value.toString('utf8') : undefined,
+    },
+  };
+}
+
+function decodeGrpcTransaction({ signature, slot, fi, mf, err, logs }) {
+  try {
+    const txMsgField = first(fi, 3);
+    if (!txMsgField || txMsgField.wire !== 2) return null;
+    const txFields = pbFields(txMsgField.value);
+    const msgField = first(txFields, 2);
+    if (!msgField || msgField.wire !== 2) return null;
+    const msgFields = pbFields(msgField.value);
+    const hdrField = first(msgFields, 1);
+    const hdrFields = hdrField && hdrField.wire === 2 ? pbFields(hdrField.value) : [];
+    const numSigners = Number(first(hdrFields, 1)?.value ?? 1);
+    const staticKeys = msgFields.filter((x) => x.field === 2 && x.wire === 2 && x.value.length === 32).map((x) => base58Encode(x.value));
+    if (!staticKeys.length) return null;
+    const loadedW = mf.filter((x) => x.field === 12 && x.wire === 2 && x.value.length === 32).map((x) => base58Encode(x.value));
+    const loadedR = mf.filter((x) => x.field === 13 && x.wire === 2 && x.value.length === 32).map((x) => base58Encode(x.value));
+    const accountKeys = [
+      ...staticKeys.map((pubkey, i) => ({ pubkey, signer: i < numSigners })),
+      ...loadedW.map((pubkey) => ({ pubkey, signer: false })),
+      ...loadedR.map((pubkey) => ({ pubkey, signer: false })),
+    ];
+    const preBalances = readRepeatedU64(mf, 3);
+    const postBalances = readRepeatedU64(mf, 4);
+    if (!preBalances.length || !postBalances.length) return null;
+    const feeField = first(mf, 2);
+    const preTokenBalances = mf.filter((x) => x.field === 7 && x.wire === 2).map((x) => decodeTokenBalance(x.value)).filter(Boolean);
+    const postTokenBalances = mf.filter((x) => x.field === 8 && x.wire === 2).map((x) => decodeTokenBalance(x.value)).filter(Boolean);
+    return {
+      slot: slot ?? null,
+      blockTime: Math.floor(Date.now() / 1000),
+      meta: {
+        err: err || null,
+        fee: feeField ? Number(feeField.value) : 5000,
+        preBalances,
+        postBalances,
+        preTokenBalances,
+        postTokenBalances,
+        logMessages: Array.isArray(logs) ? logs : [],
+      },
+      transaction: {
+        signatures: signature ? [signature] : [],
+        message: { accountKeys },
+      },
+    };
+  } catch {
+    return null;
+  }
+}
+
 // ---------- messages ----------
 const COMMITMENT = { processed: 0, confirmed: 1, finalized: 2 };
 
@@ -104,16 +202,23 @@ export function decodeSubscribeUpdate(buf) {
     const errField = first(mf, 1);
     const logsNone = first(mf, 11);
     const logs = mf.filter((x) => x.field === 6 && x.wire === 2).map((x) => x.value.toString('utf8'));
-    return {
+    const signature = sig ? base58Encode(sig.value) : null;
+    const slotNum = slot ? Number(slot.value) : null;
+    const errObj = errField && errField.value?.length ? { encoded: errField.value.toString('base64') } : null;
+    const logsList = logsNone && logsNone.value ? null : logs;
+    const parsedTx = !errObj ? decodeGrpcTransaction({ signature, slot: slotNum, fi, mf, err: errObj, logs: logsList }) : null;
+    const out = {
       kind: 'tx',
       filters,
-      signature: sig ? base58Encode(sig.value) : null,
-      slot: slot ? Number(slot.value) : null,
+      signature,
+      slot: slotNum,
       // any TransactionError means the transaction failed (its exact code is not needed here)
-      err: errField && errField.value?.length ? { encoded: errField.value.toString('base64') } : null,
-      logs: logsNone && logsNone.value ? null : logs,
+      err: errObj,
+      logs: logsList,
       isVote: Boolean(isVote && isVote.value),
     };
+    if (parsedTx) out.tx = parsedTx;
+    return out;
   }
   if (first(f, 6)) return { kind: 'ping' };
   if (first(f, 9)) return { kind: 'pong' };
@@ -297,7 +402,7 @@ export class YellowstoneFeed {
     for (const address of addresses) {
       if (!this.wallets.has(address)) continue;
       try {
-        this.onTx(address, { signature: u.signature, err: u.err, logs: u.logs, slot: u.slot, receivedAt });
+        this.onTx(address, { signature: u.signature, err: u.err, logs: u.logs, slot: u.slot, tx: u.tx || null, receivedAt });
       } catch {
         // listener errors never break the feed
       }

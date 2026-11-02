@@ -19,7 +19,7 @@ export function isPumpFunCoin(swap) {
   return Boolean(swap && /pump$/.test(String(swap.tokenMint || '')) && (swap.venue === 'pumpfun' || swap.venue === 'pumpswap'));
 }
 import { bondingCurvePda, RAYDIUM_LAUNCHLAB_PROGRAM } from './pumpCurve.mjs';
-import { pumpTradeFromLogs, swapFromPumpTrade, FAST_TRADE_PROGRAMS } from './pumpLogs.mjs';
+import { pumpTradeFromLogs, swapFromPumpTrade, launchLabTradeFromLogs, FAST_TRADE_PROGRAMS } from './pumpLogs.mjs';
 import { YellowstoneFeed } from './yellowstone.mjs';
 import { findProgramAddress, base58Decode as b58d } from './onchainMeta.mjs';
 const ASSOCIATED_TOKEN_PROGRAM = 'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL';
@@ -220,7 +220,14 @@ export function parseSwapFromTransaction(tx, wallet) {
 
   // price from the pool leg (excludes fees, tips and deposits); SOL-quoted trades only
   const swapVenue = keys.includes(PUMP_CURVE_PROGRAM) ? 'pumpfun' : keys.includes(PUMP_AMM_PROGRAM) ? 'pumpswap' : keys.includes(RAYDIUM_LAUNCHLAB_PROGRAM) ? 'launchlab' : null;
-  const poolQuote = quote.symbol === 'SOL' ? poolSolLeg(tx, wallet, { side, mint: tok.mint, venue: swapVenue, walletSol: quote.amount }) : null;
+  const llEv = swapVenue === 'launchlab' && Array.isArray(meta.logMessages) ? launchLabTradeFromLogs(meta.logMessages) : null;
+  const llSol = llEv && llEv.poolSolLamports > 0 ? llEv.poolSolLamports / LAMPORTS_PER_SOL : null;
+  const poolQuote =
+    quote.symbol === 'SOL'
+      ? llSol > 0 && llSol <= quote.amount * 1.05 + 1e-9
+        ? llSol
+        : poolSolLeg(tx, wallet, { side, mint: tok.mint, venue: swapVenue, walletSol: quote.amount })
+      : null;
 
   const before = preTotals.get(tok.mint) || 0;
   const sellSharePct = side === 'sell' && before > 0 ? Math.min(100, (Math.abs(tok.delta) / before) * 100) : side === 'sell' ? 100 : null;
@@ -242,6 +249,16 @@ export function parseSwapFromTransaction(tx, wallet) {
     blockTime: tx.blockTime ? tx.blockTime * 1000 : null,
     // where it traded: decided from the programs in the transaction, not from a data feed
     venue: swapVenue,
+    curve:
+      llEv && llEv.virtualSolReserves > 0 && llEv.virtualTokenReserves > 0
+        ? {
+            virtualSolReserves: llEv.virtualSolReserves,
+            virtualTokenReserves: llEv.virtualTokenReserves,
+            realSolReserves: llEv.realSolReserves,
+            realTokenReserves: llEv.realTokenReserves,
+            launchlab: true,
+          }
+        : undefined,
   };
 }
 
@@ -730,10 +747,48 @@ export class SolanaWalletWatcher {
         return;
       }
     }
+    if (this.fastDetect() && ev.tx) {
+      const keys = ev.tx.transaction?.message?.accountKeys || [];
+      const signedByWallet = keys.some((k) => k && typeof k === 'object' && k.pubkey === address && k.signer);
+      if (!signedByWallet) {
+        this.spamSigs.add(ev.signature);
+        return;
+      }
+      const swap = parseSwapFromTransaction(ev.tx, address);
+      if (!swap || swap.skip) {
+        this.seenSigs.add(ev.signature);
+        return;
+      }
+      this.fastTxTrade(w, ev, swap);
+      return;
+    }
     if (w.mode === 'balances' && this.fastDetect()) return;
     this.streamQueue.push({ w, ev });
     if (this.streamQueue.length > 200) this.streamQueue.splice(0, this.streamQueue.length - 200);
     this.drainStream();
+  }
+
+  /** Fast path for a full transaction delivered at `processed` commitment over Yellowstone gRPC. */
+  async fastTxTrade(w, ev, swap) {
+    const sig = ev.signature;
+    if (this.seenSigs.has(sig)) return null;
+    this.fastStats.hits += 1;
+    let signal = null;
+    try {
+      signal = await this.processSignature(w, sig, { backfill: false, via: 'fast-logs', receivedAt: ev.receivedAt, knownSwap: swap });
+    } catch {
+      this.seenSigs.delete(sig);
+      return null;
+    }
+    if (signal) {
+      this.streamStats.signals += 1;
+      if (signal.streamMs != null) {
+        this.fastStats.lagMs.push(signal.streamMs);
+        if (this.fastStats.lagMs.length > 50) this.fastStats.lagMs.shift();
+      }
+      this.confirmFastTrade(w, sig, swap).catch(() => {});
+    }
+    return signal;
   }
 
   /**
@@ -1193,8 +1248,10 @@ export class SolanaWalletWatcher {
               virtualSolReserves: Number(swap.curve.virtualSolReserves),
               virtualTokenReserves: Number(swap.curve.virtualTokenReserves),
               realTokenReserves: Number(swap.curve.realTokenReserves) || 0,
+              realSolReserves: Number(swap.curve.realSolReserves) || 0,
               mayhem: Boolean(swap.curve.mayhem),
               cashback: Boolean(swap.curve.cashback),
+              launchlab: Boolean(swap.curve.launchlab),
               tokenProgram: swap.curve.tokenProgram || null,
             }
           : null,

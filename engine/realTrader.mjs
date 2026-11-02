@@ -487,6 +487,7 @@ export class RealTrader {
   async directQuote({ side, token, amountUsd, slippagePct, tokenAmount, px }) {
     const mint = token.address;
     if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(String(mint || ''))) return null;
+    if (token?.venue === 'launchlab' || token?.venue === 'pumpswap' || token?.curve?.launchlab) return null;
     const t0 = this.now();
     const curveAddr = PD.bondingCurveAddress(mint);
     const ataSpl = PD.ataAddress(this.address, mint, PD.TOKEN_PROGRAM);
