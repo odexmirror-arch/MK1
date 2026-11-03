@@ -381,10 +381,9 @@ async function runRentReclaim({ dryRun = false, why = 'auto' } = {}) {
   if (!dryRun && (realBlockedReason || otherInstance || shuttingDownFlag)) return { ok: false, error: realBlockedReason || (otherInstance ? `another copy of Odex Mirror is running (${otherInstance.host}) — it reclaims rent there` : 'shutting down') };
   const r = await realTrader.reclaimRent({ skipMints: reclaimSkipMints(), dryRun });
   if (r.ok && !dryRun && r.reclaimedSol > 0) {
-    // the rent was booked as a cost when each coin was bought: getting it back is real profit
+    // the rent was booked as a cost when each coin was bought: credit it back to its closed position
     const px = Number(CHAINS.solana.nativePriceUsd) || 0;
-    engine.realizedLog.push({ t: Date.now(), pnl: Number((r.reclaimedSol * px).toFixed(4)), sol: Number(r.reclaimedSol.toFixed(6)), paper: false, sym: 'rent reclaimed', closes: false, kind: 'rent' });
-    engine.emit('rent_reclaimed', { closed: r.closed, sol: r.reclaimedSol, why });
+    engine.creditReclaimedRent({ byMint: r.byMint, reclaimedSol: r.reclaimedSol, px, why, closed: r.closed });
     console.log(`Rent reclaim (${why}): closed ${r.closed} empty token account(s), +${r.reclaimedSol.toFixed(5)} SOL`);
   }
   return r;

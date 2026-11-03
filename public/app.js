@@ -31,7 +31,7 @@ function connectSseStream() {
     try {
       const payload = JSON.parse(evt.data);
       if (handleLiveSse(payload)) return;
-      if (payload.event === 'position_sold' || payload.event === 'records_pruned' || payload.event === 'state_reset' || payload.event === 'history_cleared' || payload.event === 'follow_added' || payload.event === 'follow_removed' || payload.event === 'follows_updated') pnlSummary.at = 0; // refetch totals
+      if (payload.event === 'position_sold' || payload.event === 'rent_reclaimed' || payload.event === 'records_pruned' || payload.event === 'state_reset' || payload.event === 'history_cleared' || payload.event === 'follow_added' || payload.event === 'follow_removed' || payload.event === 'follows_updated') pnlSummary.at = 0; // refetch totals
       // real trade closed/opened: the bot wallet balance changed on-chain — show it right away
       if (payload.event === 'bot_balance' && payload.data) {
         window.__botStatus = { ...(window.__botStatus || {}), balance: payload.data };
@@ -960,7 +960,7 @@ function durationShort(ms) {
 
 function fmtSol(n) {
   const a = Math.abs(n);
-  return a >= 100 ? a.toFixed(1) : a >= 1 ? a.toFixed(2) : a >= 0.01 ? a.toFixed(3) : a.toFixed(4);
+  return a >= 100 ? a.toFixed(1) : a >= 1 ? a.toFixed(2) : a.toFixed(4);
 }
 function signedSol(n) {
   return `${n < 0 ? '\u2212' : '+'}${fmtSol(n)} SOL`;
@@ -1860,7 +1860,7 @@ function renderBotWalletCard(fromLoad = false) {
       <div class="sw-bottom">
         <div class="sw-bal">
           ${b
-            ? `<div><strong class="mono">${Number(b.sol).toFixed(3)}</strong> <span>SOL</span> <span class="sw-muted mono">· ${Number(b.usdc || 0).toFixed(2)} USDC</span></div>
+            ? `<div><strong class="mono">${Number(b.sol).toFixed(b.sol >= 100 ? 2 : 4)}</strong> <span>SOL</span> <span class="sw-muted mono">· ${Number(b.usdc || 0).toFixed(2)} USDC</span></div>
           <div class="sw-usd mono">≈ ${formatUsd(Number(b.sol) * solPx + Number(b.usdc || 0))} on-chain${lowFunds ? ' · <span class="bw-warn">add SOL to trade</span>' : ''}</div>`
             : `<div><strong class="mono">—</strong> <span>SOL</span></div><div class="sw-usd mono">${addr ? 'Reading balance…' : 'Balance shows once the key is set'}</div>`}
           ${s.configured ? `<div class="bw-limits mono">Max ${caps.maxSolPerTrade} SOL per buy · ${caps.maxSolPerDay > 0 ? `${spent.toFixed(3)} / ${caps.maxSolPerDay} SOL used today` : 'no daily cap'} · ${caps.reserveSol} SOL kept for fees</div>` : ''}
@@ -4593,10 +4593,10 @@ function renderBalancesEverywhereLite() {
   lastPaperModeSeen = paperNow;
   const b = botWalletBalance() || balanceFor(activeWalletObj());
   const pill = document.getElementById('header-sol-balance');
-  if (pill) pill.textContent = b ? `${b.sol.toFixed(b.sol >= 100 ? 1 : 3)} SOL` : walletChainAddress() ? '… SOL' : '0.00 SOL';
+  if (pill) pill.textContent = b ? `${b.sol.toFixed(b.sol >= 100 ? 1 : 4)} SOL` : walletChainAddress() ? '… SOL' : '0.0000 SOL';
   const usdcEl = document.getElementById('hwd-usdc-bal');
   // the big number is SOL; the line under it shows the USD value (+ USDC when the wallet holds any)
-  if (usdcEl) usdcEl.textContent = b ? b.sol.toFixed(b.sol >= 100 ? 2 : 3) : '0.00';
+  if (usdcEl) usdcEl.textContent = b ? b.sol.toFixed(b.sol >= 100 ? 2 : 4) : '0.0000';
   const solEl = document.getElementById('hwd-sol-bal');
   if (solEl) solEl.textContent = b ? `≈ ${formatUsd(b.usd)}${b.usdc > 0 ? ` · ${b.usdc.toFixed(2)} USDC` : ''}` : walletChainAddress() ? 'Reading balance…' : 'No address linked';
   const pb = document.getElementById('paper-bal');
@@ -4936,7 +4936,7 @@ function renderPhantom() {
   const row = document.getElementById('hwd-phantom');
   if (row) {
     row.innerHTML = addr
-      ? `<span class="hwd-bal-lbl">${esc(lw.name)}</span><span class="hwd-bal-num mono" title="${esc(addr)}">${esc(shortAddr(addr))}${phantomBalanceSol !== null ? ` · ${Number(phantomBalanceSol).toFixed(3)} SOL` : ''}</span>`
+      ? `<span class="hwd-bal-lbl">${esc(lw.name)}</span><span class="hwd-bal-num mono" title="${esc(addr)}">${esc(shortAddr(addr))}${phantomBalanceSol !== null ? ` · ${Number(phantomBalanceSol).toFixed(4)} SOL` : ''}</span>`
       : `<span class="hwd-bal-lbl">Phantom</span><button class="link-btn" onclick="toggleHeaderWalletDropdown(); openDepositModal('deposit')">Connect</button>`;
   }
 }

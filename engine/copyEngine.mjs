@@ -2081,13 +2081,75 @@ export class CopyTradingEngine {
   }
 
   /**
+   * Credit reclaimed token-account rent back to a closed real position, its history receipt,
+   * and its PnL-log entry so the Closed Trades row matches the exact on-chain wallet change.
+   */
+  applyRentToClosedPosition(pos, rentSol, rentUsd = null, closeLogEntry = null) {
+    const sol = Number(rentSol) || 0;
+    if (!pos || pos.isPaper !== false || pos.remainingTokens > 0 || pos.rentReclaimedSol > 0 || !(sol > 0)) return false;
+    const px = Number(pos.entrySolPriceUsd || CHAINS.solana?.nativePriceUsd) || 0;
+    const usd = Number.isFinite(Number(rentUsd)) && Number(rentUsd) > 0 ? Number(rentUsd) : sol * px;
+    pos.rentReclaimedSol = Number(sol.toFixed(6));
+    if (pos.soldSol != null) pos.soldSol = Number((Number(pos.soldSol) + sol).toFixed(6));
+    if (pos.soldUsd != null) pos.soldUsd = Number((Number(pos.soldUsd) + usd).toFixed(4));
+    pos.realizedPnlUsd = Number((Number(pos.realizedPnlUsd || 0) + usd).toFixed(4));
+    const entry = closeLogEntry || [...(this.realizedLog || [])].reverse().find((e) => e.pid === pos.id && e.closes);
+    if (entry) {
+      entry.pnl = Number((Number(entry.pnl || 0) + usd).toFixed(2));
+      entry.posPnl = Number(Number(pos.realizedPnlUsd).toFixed(2));
+      if (entry.sol != null) entry.sol = Number((Number(entry.sol) + sol).toFixed(6));
+      entry.rentSol = pos.rentReclaimedSol;
+    }
+    const receipt = (this.history || []).find((h) => h.side === 'sell' && h.isPaper === false && h.tokenAddress === pos.tokenAddress && Math.abs((h.timestamp || 0) - (pos.closedAt || 0)) < 5000);
+    if (receipt) {
+      receipt.amountUsd = Number((Number(receipt.amountUsd || 0) + usd).toFixed(4));
+      receipt.pnlUsd = Number((Number(receipt.pnlUsd || 0) + usd).toFixed(2));
+      if (pos.initialCostUsd > 0) receipt.pnlPct = Number(((pos.realizedPnlUsd / pos.initialCostUsd) * 100).toFixed(2));
+    }
+    return true;
+  }
+
+  creditReclaimedRent({ byMint = [], reclaimedSol = 0, px = Number(CHAINS.solana?.nativePriceUsd) || 0, at = Date.now(), why = 'auto', closed = 0 } = {}) {
+    let creditedSol = 0;
+    for (const item of byMint || []) {
+      const sol = Number(item?.sol) || 0;
+      if (!(sol > 0) || !item?.mint) continue;
+      const pos = (this.positions || [])
+        .filter((p) => p.isPaper === false && p.remainingTokens <= 0 && p.tokenAddress === item.mint && !(p.rentReclaimedSol > 0))
+        .sort((a, b) => (b.closedAt || b.openedAt || 0) - (a.closedAt || a.openedAt || 0))[0];
+      if (pos && this.applyRentToClosedPosition(pos, sol, sol * (pos.entrySolPriceUsd || px))) {
+        creditedSol += sol;
+      }
+    }
+    const leftoverSol = Math.max(0, (Number(reclaimedSol) || 0) - creditedSol);
+    if (leftoverSol > 0.00001) {
+      this.realizedLog.push({ t: at, pnl: Number((leftoverSol * px).toFixed(4)), sol: Number(leftoverSol.toFixed(6)), paper: false, sym: 'rent reclaimed', closes: false, kind: 'rent' });
+    }
+    this.emit('rent_reclaimed', { closed, sol: reclaimedSol, creditedSol, why });
+    return { creditedSol, leftoverSol };
+  }
+
+  /**
    * Older PnL-log rows have no trader / scorecard fields: fill them in from the closed positions
    * and buy receipts still on record (last 2 days). Safe to run more than once.
    */
   backfillScorecardLog() {
     let filled = 0;
     const byId = new Map(this.positions.map((p) => [p.id, p]));
-    for (const r of this.realizedLog || []) {
+    const log = this.realizedLog || [];
+    for (let i = 0; i < log.length; i++) {
+      const r = log[i];
+      if (r.kind === 'rent' && r.closes === false && r.paper === false && Number(r.sol) > 0 && Number(r.sol) < 0.005 && i > 0) {
+        const prev = log[i - 1];
+        const p = prev?.closes && prev?.paper === false && prev?.pid ? byId.get(prev.pid) : null;
+        if (p && !(p.rentReclaimedSol > 0) && r.t >= prev.t && r.t - prev.t <= 120_000) {
+          if (this.applyRentToClosedPosition(p, Number(r.sol), Number(r.pnl), prev)) {
+            r._folded = true;
+            filled += 1;
+            continue;
+          }
+        }
+      }
       if (!r.pid) continue;
       const p = byId.get(r.pid);
       if (!p) continue;
@@ -2110,6 +2172,9 @@ export class CopyTradingEngine {
         touched = true;
       }
       if (touched) filled += 1;
+    }
+    if (log.some((r) => r._folded)) {
+      this.realizedLog = log.filter((r) => !r._folded);
     }
     return filled;
   }

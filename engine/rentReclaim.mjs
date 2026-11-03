@@ -103,7 +103,7 @@ export async function findClosableAccounts(rpc, owner, { skipMints = new Set() }
  */
 export async function reclaimRent({ rpc, keypair, owner, skipMints, dryRun = false, maxAccounts = 60, waitForSignature = null }) {
   const found = (await findClosableAccounts(rpc, owner, { skipMints })).slice(0, maxAccounts);
-  const result = { found: found.length, foundSol: found.reduce((a, x) => a + x.lamports, 0) / LAMPORTS, closed: 0, reclaimedSol: 0, failed: 0, signatures: [], errors: [] };
+  const result = { found: found.length, foundSol: found.reduce((a, x) => a + x.lamports, 0) / LAMPORTS, closed: 0, reclaimedSol: 0, failed: 0, signatures: [], byMint: [], errors: [] };
   if (dryRun || !found.length) return result;
   const trySend = async (batch) => {
     const bh = await rpc('getLatestBlockhash', [{ commitment: 'confirmed' }]);
@@ -121,6 +121,10 @@ export async function reclaimRent({ rpc, keypair, owner, skipMints, dryRun = fal
       result.closed += batch.length;
       result.reclaimedSol += batch.reduce((a, x) => a + x.lamports, 0) / LAMPORTS;
       result.signatures.push(r.signature);
+      const feeShare = batch.length > 0 ? 0.000005 / batch.length : 0;
+      for (const x of batch) {
+        result.byMint.push({ mint: x.mint, sol: Math.max(0, x.lamports / LAMPORTS - feeShare) });
+      }
     } else {
       result.failed += batch.length;
       if (result.errors.length < 5) result.errors.push(r.error);

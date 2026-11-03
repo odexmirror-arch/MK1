@@ -109,3 +109,31 @@ test('RR4 an unconfirmed send is not counted as reclaimed', async () => {
   assert.equal(r.reclaimedSol, 0);
   assert.match(r.errors[0], /not confirmed/);
 });
+
+test('RR5 creditReclaimedRent and backfillScorecardLog fold reclaimed rent into the closed real position row', async () => {
+  const { CopyTradingEngine } = await import('../engine/copyEngine.mjs');
+  const e = new CopyTradingEngine();
+  e.positions.push({
+    id: 'pos-1',
+    isPaper: false,
+    chainId: 'solana',
+    tokenAddress: 'Mint1pump',
+    symbol: 'ASCEND',
+    initialCostUsd: 6.0907,
+    investedSol: 0.066046,
+    soldUsd: 6.1674,
+    soldSol: 0.066877,
+    realizedPnlUsd: 0.0767,
+    entrySolPriceUsd: 92.22,
+    remainingTokens: 0,
+    openedAt: 1000,
+    closedAt: 2000,
+  });
+  e.realizedLog.push({ t: 2000, pid: 'pos-1', pnl: 0.08, posPnl: 0.08, sol: 0.000867, sym: 'ASCEND', paper: false, closes: true });
+  e.creditReclaimedRent({ byMint: [{ mint: 'Mint1pump', sol: 0.001509 }], reclaimedSol: 0.001509, px: 92.22, at: 32000 });
+  const c = e.getStateSnapshot().closedPositions.find((p) => p.id === 'pos-1');
+  assert.equal(c.pnlSol, 0.0023);
+  assert.equal(c.pnlUsd, 0.22);
+  assert.equal(e.realizedLog.length, 1);
+  assert.equal(e.realizedLog[0].sol, 0.002376);
+});
