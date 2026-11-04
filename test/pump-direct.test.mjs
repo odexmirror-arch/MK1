@@ -469,7 +469,7 @@ test('PD19 direct buy blasts fastRpcUrls before awaiting primary sendTransaction
   const r = await trader.execute({ side: 'buy', token, amountUsd: 10, quote: q, slippagePct: 10 });
   assert.equal(r.ok, true, r.error);
   assert.deepEqual(order.slice(0, 3), ['blast', 'primary-send-start', 'primary-send-end']);
-  assert.ok(sleepIntervals.includes(100), `expected 100ms status poll interval, got ${sleepIntervals.join(', ')}`);
+  assert.ok(sleepIntervals.some((ms) => ms > 0 && ms <= 100), `expected stepped <=100ms status poll interval, got ${sleepIntervals.join(', ')}`);
 });
 
 test('PD20 non-SOL-paired pump.fun curve skips BUY immediately without falling back to Jupiter, while SELL still falls back to Jupiter', async () => {
@@ -523,6 +523,43 @@ test('PD21 Yellowstone gRPC TradeEvent curve reserves skip getMultipleAccounts R
   assert.equal(calls.length, 0, `zero RPC calls during direct SELL quote when Yellowstone curve + mintMetaCache are warm: ${calls.join(', ')}`);
   const rs = await trader.execute({ side: 'sell', token: fastToken, tokenAmount: 'all', quote: qs, slippagePct: 15 });
   assert.equal(rs.ok, true, rs.error);
+});
+
+test('PD22 direct buy 6042 is preserved from waitForSignature even if second RPC returns [null], and Jupiter fallback enforces entryCeilingUsd', async () => {
+  // Part A: waitForSignature sees 6042 on poll #1, and any subsequent getSignatureStatuses returns [null]
+  const { trader, w, token } = world({ landMode: 'failed' });
+  let statusCalls = 0;
+  const origRpc = trader.rpc;
+  trader.rpc = async (method, params) => {
+    if (method === 'getSignatureStatuses') {
+      statusCalls += 1;
+      if (statusCalls === 1) return { value: [{ confirmationStatus: 'confirmed', err: { InstructionError: [3, { Custom: 6042 }] } }] };
+      return { value: [null] };
+    }
+    return origRpc(method, params);
+  };
+  const q = await trader.quote({ side: 'buy', token, amountUsd: 10, slippagePct: 10 });
+  const r = await trader.execute({ side: 'buy', token, amountUsd: 10, quote: q, slippagePct: 10 });
+  assert.equal(r.ok, false);
+  assert.equal(r.priceMoved, true, 'cached 6042 error treated as priceMoved skip, never Jupiter fallback');
+  assert.equal(w.jupiterOrders, 0, 'zero Jupiter fallback calls when pump.fun rejected on 6042');
+
+  // Part B: If direct simulation genuinely falls back to Jupiter, entryCeilingUsd blocks an over-pumped Jupiter quote (+50% above trader)
+  const w2 = world({ simMode: 'other' });
+  let jupExecs = 0;
+  w2.trader.fetch = async (url) => {
+    if (String(url).includes('/order')) {
+      // $10 buy returning only 1,000,000_000 raw (1,000 tokens = $0.01/token, +66% above $0.006 ceiling)
+      return { ok: true, status: 200, text: async () => JSON.stringify({ transaction: Buffer.alloc(100).toString('base64'), requestId: 'r-high', inAmount: '50000000', outAmount: '1000000000', router: 'metis' }) };
+    }
+    jupExecs += 1;
+    return { ok: true, status: 200, text: async () => JSON.stringify({ status: 'Success' }) };
+  };
+  const q2 = await w2.trader.quote({ side: 'buy', token: w2.token, amountUsd: 10, slippagePct: 10 });
+  const r2 = await w2.trader.execute({ side: 'buy', token: w2.token, amountUsd: 10, quote: q2, slippagePct: 10, entryCeilingUsd: 0.0075 });
+  assert.equal(r2.ok, false);
+  assert.equal(r2.priceMoved, true, 'Jupiter fallback blocked when quote exceeds entryCeilingUsd');
+  assert.equal(jupExecs, 0, 'over-ceiling Jupiter fallback never signed or executed');
 });
 
 

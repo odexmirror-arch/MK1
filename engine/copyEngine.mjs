@@ -991,6 +991,7 @@ export class CopyTradingEngine {
         paper,
         assetMode: buyAssetMode,
         slippagePct: buySlippagePct,
+        entryCeilingUsd,
         // first holding of this token opens a token account (rent) — same as a real buy
         newTokenAccount: !this.positions.some((p) => p.tokenAddress === token.address && p.remainingTokens > 0 && Boolean(p.isPaper) === paper),
         // real copies: the late-copy limit holds until the swap is SENT (detection + quote time count too)
@@ -1066,6 +1067,7 @@ export class CopyTradingEngine {
       isPaper: paper,
       txHash: execResult.txHash || null,
       tokenAddress: token.address,
+      decimals: Number.isInteger(token.decimals) ? token.decimals : null,
       symbol: token.symbol,
       name: token.name || token.symbol,
       imageUrl: token.imageUrl || null,
@@ -1337,7 +1339,10 @@ export class CopyTradingEngine {
         side: 'sell',
         token: {
           address: pos.tokenAddress,
+          decimals: Number.isInteger(pos.decimals) ? pos.decimals : undefined,
           symbol: pos.symbol,
+          venue: pos.venue || null,
+          stage: pos.stage || null,
           currentPriceUsd: pos.currentPriceUsd,
           marketCapUsd: pos.currentMarketCapUsd,
           liquidityUsd: pos.liquidityUsd,
@@ -1389,7 +1394,7 @@ export class CopyTradingEngine {
       chainId: pos.chainId,
       wallet,
       side: 'sell',
-      token: { address: pos.tokenAddress, symbol: pos.symbol, stage: pos.stage, launchpad: pos.launchpad, marketCapUsd: pos.currentMarketCapUsd, createdAt: pos.tokenCreatedAt, venue: pos.venue, curve: sellCurve },
+      token: { address: pos.tokenAddress, decimals: Number.isInteger(pos.decimals) ? pos.decimals : undefined, symbol: pos.symbol, stage: pos.stage, launchpad: pos.launchpad, marketCapUsd: pos.currentMarketCapUsd, createdAt: pos.tokenCreatedAt, venue: pos.venue, curve: sellCurve },
       // paper fee is 1% of what the sale actually fills at (after price impact)
       amountUsd: real ? grossValueUsd : tokensSold * quote.expectedFillPriceUsd,
       quote,
@@ -1556,14 +1561,29 @@ export class CopyTradingEngine {
       (p) => p.remainingTokens > 0 && (!chainId || chainId === 'all' || p.chainId === chainId)
     );
 
-    const results = [];
+    // Sell distinct tokens in parallel so Panic Sell / Sell All exits all bags simultaneously,
+    // while keeping multiple positions of the same real token sequential so wallet balances never race.
+    const groups = new Map();
     for (const pos of targets) {
-      const res = await this.executePositionSell(pos.id, {
-        sellPct: 100,
-        cause: panic ? 'panic sell' : 'sell all',
-      });
-      results.push(res);
+      const key = !pos.isPaper && pos.tokenAddress ? `${pos.chainId}:${pos.tokenAddress}` : pos.id;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(pos);
     }
+    const groupResults = await Promise.all(
+      [...groups.values()].map(async (group) => {
+        const out = [];
+        for (const pos of group) {
+          out.push(
+            await this.executePositionSell(pos.id, {
+              sellPct: 100,
+              cause: panic ? 'panic sell' : 'sell all',
+            })
+          );
+        }
+        return out;
+      })
+    );
+    const results = groupResults.flat();
 
     this.emit('bulk_sell', { panic, chainId, count: results.length });
     return { ok: true, panic, soldCount: results.filter((r) => r.ok).length, results };

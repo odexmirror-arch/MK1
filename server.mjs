@@ -66,8 +66,13 @@ function broadcastRaw(obj) {
 
 // Live wallet watching (signals only — reads public chain data, never trades)
 export const liveSignals = new LiveSignalService({ engine, broadcast: broadcastRaw, alchemy });
-// Live pump.fun curve prices / liquidity for open positions (same RPC, rate-limited)
-engine.curveSource = (mints) => fetchPumpCurves((m, p) => liveSignals.watcher.rpc(m, p), mints, CHAINS.solana.nativePriceUsd);
+// Live pump.fun & Raydium LaunchLab curve prices / liquidity for open positions (fast RPC when real trade open)
+engine.curveSource = (mints) => {
+  const open = engine.positions.filter((p) => p.remainingTokens > 0);
+  const hasRealOpen = open.some((p) => p.isPaper === false);
+  const launchLabMints = new Set(open.filter((p) => p.venue === 'launchlab').map((p) => p.tokenAddress));
+  return fetchPumpCurves((m, p) => liveSignals.watcher.rpc(m, p, { fast: hasRealOpen }), mints, CHAINS.solana.nativePriceUsd, launchLabMints);
+};
 // Logos / wallet pictures straight from chain data when Alchemy DAS is down (same RPC as Live Signals)
 alchemy.fallback = new OnchainMetadata({ rpc: (method, params) => liveSignals.watcher.rpc(method, params) });
 
@@ -103,8 +108,17 @@ if (persistence) {
 // ---------- Real trading (Paper Trading OFF + ODEX_TRADER_KEY in .env) ----------
 // The SOL price must be live before a real order is sized (never the built-in placeholder)
 let solPriceLive = false;
-const heliusFastRpc = process.env.HELIUS_API_KEY ? `https://mainnet.helius-rpc.com/?api-key=${String(process.env.HELIUS_API_KEY).trim()}` : null;
-const jitoBlockEngine = process.env.ODEX_JITO_RPC_URL || 'https://mainnet.block-engine.jito.wtf/api/v1/transactions';
+const heliusApiKey = process.env.HELIUS_API_KEY ? String(process.env.HELIUS_API_KEY).trim() : null;
+const heliusFastRpc = heliusApiKey ? `https://mainnet.helius-rpc.com/?api-key=${heliusApiKey}` : null;
+const heliusStakedRpc = heliusApiKey ? `https://staked.helius-rpc.com?api-key=${heliusApiKey}` : null;
+const jitoEndpoints = process.env.ODEX_JITO_RPC_URL
+  ? [String(process.env.ODEX_JITO_RPC_URL).trim()]
+  : [
+      'https://mainnet.block-engine.jito.wtf/api/v1/transactions',
+      'https://ny.mainnet.block-engine.jito.wtf/api/v1/transactions',
+      'https://frankfurt.mainnet.block-engine.jito.wtf/api/v1/transactions',
+      'https://amsterdam.mainnet.block-engine.jito.wtf/api/v1/transactions',
+    ];
 // Sodae (optional): also receives our signed swaps (one credit each) — never used for routine reads,
 // so the free tier's 100k monthly credits last
 const sodaeRpc = String(process.env.SODAE_RPC_URL || '').trim() || null;
@@ -118,7 +132,7 @@ const sodaeKeyOnly = (() => {
 export const realTrader = new RealTrader({
   env: process.env,
   rpc: (method, params) => liveSignals.watcher.rpc(method, params, { fast: true }),
-  fastRpcUrls: [heliusFastRpc, liveSignals.watcher.rpcUrl, jitoBlockEngine, sodaeRpc].filter(Boolean),
+  fastRpcUrls: [heliusStakedRpc, heliusFastRpc, liveSignals.watcher.rpcUrl, ...jitoEndpoints, sodaeRpc].filter(Boolean),
   solPrice: () => (solPriceLive ? CHAINS.solana.nativePriceUsd : 0),
   state: db ? db.get('realTrader') : null,
   onChange: () => {
@@ -141,6 +155,7 @@ realTrader.routeSetting = () => (process.env.ODEX_SWAP_ROUTE === 'jupiter' ? 'ju
 liveSignals.watcher.fastDetect = () => process.env.ODEX_FAST_DETECT !== 'off' && engine.settings.fastDetect === true;
 realTrader.priorityMicroLamports = () => Number(process.env.ODEX_DIRECT_PRIORITY_MICROLAMPORTS || 100_000);
 realTrader.startBlockhashWarmer();
+realTrader.startConnectionWarmer();
 
 engine.adapter.liveHooks = realTrader.hooks();
 // Paper Mode on Solana: match real-SOL execution time (~700 ms on direct pump.fun curve, ~1,000 ms on Jupiter)
@@ -557,7 +572,7 @@ engine.livePriceMinAgeMs = 1500;
 let lastTickAt = 0;
 setInterval(async () => {
   if (!autoTickEnabled || ticksRunning >= 2 || shuttingDownFlag) return;
-  const fastOpen = engine.positions.some((p) => p.remainingTokens > 0 && (p.isPaper === false || p.stage === 'pre-grad' || p.venue === 'pumpfun'));
+  const fastOpen = engine.positions.some((p) => p.remainingTokens > 0 && (p.isPaper === false || p.stage === 'pre-grad' || p.venue === 'pumpfun' || p.venue === 'launchlab'));
   if (!fastOpen && Date.now() - lastTickAt < 1950) return;
   lastTickAt = Date.now();
   ticksRunning += 1;
@@ -2299,6 +2314,7 @@ function shutdown(signal) {
   shuttingDownFlag = true; // stop exits and lock refreshes right away
   liveSignals.watcher.stop();
   realTrader.stopBlockhashWarmer();
+  realTrader.stopConnectionWarmer();
   // free the one-bot-at-a-time lock so another copy can take over right away
   if (supabase.enabled && !otherInstance) supabase.push([['instance_lock', { id: INSTANCE_ID, host: 'stopped', at: 0 }]]).catch(() => {});
   const done = () => process.exit(0);

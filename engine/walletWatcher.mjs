@@ -1050,7 +1050,34 @@ export class SolanaWalletWatcher {
       if (!fast) await this.throttle();
       try {
         if (fast && altUrls.length && attempt === 0) {
-          return await Promise.any([this.rpcOnce(method, params, rpcUrl), ...altUrls.map((u) => this.rpcOnce(method, params, u))]);
+          const urls = [rpcUrl, ...altUrls];
+          if (method === 'getTransaction' || method === 'getSignatureStatuses') {
+            const isIndexed =
+              method === 'getTransaction'
+                ? (r) => r != null
+                : (r) => Array.isArray(r?.value) && r.value.some((st) => st && (st.err || st.confirmationStatus === 'confirmed' || st.confirmationStatus === 'finalized'));
+            let fallbackOk;
+            let haveFallback = false;
+            try {
+              return await Promise.any(
+                urls.map(async (u) => {
+                  const r = await this.rpcOnce(method, params, u);
+                  if (!isIndexed(r)) {
+                    if (!haveFallback) {
+                      fallbackOk = r;
+                      haveFallback = true;
+                    }
+                    throw new Error('not indexed yet');
+                  }
+                  return r;
+                })
+              );
+            } catch (raceErr) {
+              if (haveFallback) return fallbackOk;
+              throw raceErr;
+            }
+          }
+          return await Promise.any(urls.map((u) => this.rpcOnce(method, params, u)));
         }
         return await this.rpcOnce(method, params, rpcUrl);
       } catch (err) {
@@ -1094,6 +1121,7 @@ export class SolanaWalletWatcher {
     const ctrl = new AbortController();
     // Token-account listings of spam-flooded wallets can be several MB: give them more time
     const t = setTimeout(() => ctrl.abort(), method === 'getTokenAccountsByOwner' ? 30_000 : 10_000);
+    t.unref?.();
     let res;
     const startedAt = Date.now();
     try {
@@ -1101,6 +1129,7 @@ export class SolanaWalletWatcher {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ jsonrpc: '2.0', id: this.status.rpcCalls, method, params }),
+        keepalive: true,
         signal: ctrl.signal,
       });
     } catch (err) {
@@ -1177,7 +1206,8 @@ export class SolanaWalletWatcher {
     // pump.fun coins are all alike: 1 billion supply, mint and freeze authority revoked. Their
     // details are not worth waiting for: market cap comes from the trader's own fill price.
     const pumpCoin = isPumpFunCoin(swap) || swap.venue === 'launchlab' || (via === 'fast-logs' && Boolean(swap.curve));
-    const useFastInfoCache = via === 'fast-logs' && Boolean(swap.curve) && this.tokenInfo?.cache instanceof Map;
+    const liveStream = via === 'fast-logs' || via === 'stream' || via === 'token-stream';
+    const useFastInfoCache = !backfill && liveStream && Boolean(swap.curve) && this.tokenInfo?.cache instanceof Map;
     const fastCachedHit = useFastInfoCache ? this.tokenInfo.cache.get(swap.tokenMint) : null;
     const budgetMs = pumpCoin ? Math.min(this.tokenInfoBudgetMs, this.pumpInfoBudgetMs) : this.tokenInfoBudgetMs;
     const infoPromise = this.tokenInfo.get(swap.tokenMint);

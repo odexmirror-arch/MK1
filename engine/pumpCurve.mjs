@@ -130,7 +130,7 @@ export function curveMetrics(curve, solPriceUsd) {
  * Read many curves in one RPC call. Returns Map mint → metrics (only tokens still on a curve).
  * @param rpc async (method, params) => result
  */
-export async function fetchPumpCurves(rpc, mints, solPriceUsd) {
+export async function fetchPumpCurves(rpc, mints, solPriceUsd, launchLabMints = null) {
   const out = new Map();
   const list = [...new Set(mints)].filter(Boolean).slice(0, 100);
   if (!list.length) return out;
@@ -142,7 +142,7 @@ export async function fetchPumpCurves(rpc, mints, solPriceUsd) {
     } catch {
       // ignore invalid base58
     }
-    if (!/pump$/i.test(m)) {
+    if (!/pump$/i.test(m) || launchLabMints?.has?.(m)) {
       try {
         const llPda = launchLabPoolPda(m);
         if (llPda) valid.push([m, llPda, 'launchlab']);

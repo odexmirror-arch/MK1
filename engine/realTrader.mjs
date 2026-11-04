@@ -279,8 +279,13 @@ export class RealTrader {
     return total;
   }
 
-  async refreshBalance() {
+  async refreshBalance({ solOnly = false } = {}) {
     if (!this.ready()) return null;
+    if (solOnly) {
+      const solR = await this.rpc('getBalance', [this.address, { commitment: 'confirmed' }]);
+      this.balance = { sol: Number(solR?.value ?? solR ?? 0) / LAMPORTS, usdc: this.balance?.usdc ?? 0, at: this.now() };
+      return this.balance;
+    }
     const [solR, usdcRaw] = await Promise.all([this.rpc('getBalance', [this.address, { commitment: 'confirmed' }]), this.getTokenBalanceRaw(USDC_MINT).catch(() => 0n)]);
     this.balance = { sol: Number(solR?.value ?? solR ?? 0) / LAMPORTS, usdc: Number(usdcRaw) / 1e6, at: this.now() };
     return this.balance;
@@ -296,8 +301,13 @@ export class RealTrader {
     try {
       const res = await this.fetch(url.toString(), {
         method,
-        headers: { Accept: 'application/json', ...(body ? { 'Content-Type': 'application/json' } : {}), ...(this.jupKey ? { 'x-api-key': this.jupKey } : {}) },
+        headers: {
+          Accept: 'application/json',
+          ...(body ? { 'Content-Type': 'application/json' } : {}),
+          ...(this.jupKey ? { 'x-api-key': this.jupKey } : {}),
+        },
         body: body ? JSON.stringify(body) : undefined,
+        keepalive: true,
         signal: ctrl.signal,
       });
       const text = await res.text();
@@ -390,18 +400,48 @@ export class RealTrader {
     if (side === 'buy') {
       const amountRaw = quoteMint === WSOL_MINT ? BigInt(Math.floor((amountUsd / px) * LAMPORTS)) : BigInt(Math.floor(amountUsd * 1e6));
       // copy speed: the wallet balance and a brand-new coin's decimals (one RPC call each) are
-      // read while Jupiter quotes, so the buy's balance check does not wait for them later
-      this.prefetchedBalance = { at: this.now(), promise: this.refreshBalance().catch(() => null) };
+      // read while Jupiter quotes; native SOL buys skip USDC token-account RPC lookups
+      const solOnly = quoteMint === WSOL_MINT;
+      this.prefetchedBalance = { at: this.now(), solOnly, promise: this.refreshBalance({ solOnly }).catch(() => null) };
       [tokDec, order] = await Promise.all([this.getDecimals(token.address), this.order({ inputMint: quoteMint, outputMint: token.address, amountRaw, slippagePct })]);
       const tokensOut = Number(order.outAmount) / 10 ** tokDec;
       quotedPriceUsd = tokensOut > 0 ? amountUsd / tokensOut : 0;
     } else {
       const until = urgent ? 0 : this.sellBlockedUntil.get(token.address) || 0;
       if (this.now() < until) throw Object.assign(new Error(`waiting ${Math.ceil((until - this.now()) / 1000)} s before retrying this sell`), { backoff: true });
+      const cachedHeld = this.mintMetaCache?.get(token.address)?.heldRaw || 0n;
+      const knownDec = this.decimals.get(token.address);
+      const activeBuying = (this.activeBuyCount?.get(token.address) || 0) > 0;
+      let optimisticRaw = null;
+      if (cachedHeld > 0n && Number.isInteger(knownDec) && !activeBuying) {
+        if (tokenAmount === 'all') {
+          optimisticRaw = cachedHeld;
+        } else {
+          const want = BigInt(Math.floor(Number(tokenAmount) * 10 ** knownDec));
+          if (want > 0n) optimisticRaw = want > cachedHeld ? cachedHeld : want;
+        }
+      }
+      // Fire Jupiter /order immediately using cached heldRaw in parallel with live RPC balance check
+      const orderOptP =
+        optimisticRaw !== null
+          ? this.order({ inputMint: token.address, outputMint: quoteMint, amountRaw: optimisticRaw, slippagePct }).then(
+              (o) => ({ ok: true, o }),
+              (e) => ({ ok: false, e })
+            )
+          : null;
       const [dec, held] = await Promise.all([this.getDecimals(token.address), this.getTokenBalanceRaw(token.address)]);
       tokDec = dec;
+      if (!this.mintMetaCache) this.mintMetaCache = new Map();
+      const prevMeta = this.mintMetaCache.get(token.address);
+      this.mintMetaCache.set(token.address, { ...(prevMeta || {}), heldRaw: held });
       const raw = await this.sellAmountRaw(token.address, tokenAmount, tokDec, held);
-      order = await this.order({ inputMint: token.address, outputMint: quoteMint, amountRaw: raw, slippagePct });
+      if (orderOptP && raw === optimisticRaw) {
+        const opt = await orderOptP;
+        if (!opt.ok) throw opt.e;
+        order = opt.o;
+      } else {
+        order = await this.order({ inputMint: token.address, outputMint: quoteMint, amountRaw: raw, slippagePct });
+      }
       const outUsd = quoteMint === WSOL_MINT ? (Number(order.outAmount) / LAMPORTS) * px : Number(order.outAmount) / 1e6;
       const tokens = Number(raw) / 10 ** tokDec;
       quotedPriceUsd = tokens > 0 ? outUsd / tokens : 0;
@@ -481,13 +521,76 @@ export class RealTrader {
   }
 
   /**
+   * Pre-warm and hold open TLS / HTTP keep-alive sockets to Jupiter and all fast broadcast RPCs
+   * (Helius Staked, Helius, Alchemy, Jito Block Engines) so sudden copy trades skip the ~150–250 ms
+   * cold TCP + TLS handshake. Credit-metered Sodae URLs are skipped so monthly credits stay untouched.
+   */
+  async warmConnections() {
+    if (!this.ready()) return 0;
+    const origins = new Set();
+    try {
+      origins.add(new URL(this.jupBase).origin);
+    } catch {
+      // ignore invalid URL
+    }
+    for (const u of this.fastRpcUrls || []) {
+      try {
+        const parsed = new URL(u);
+        if (/sodae/i.test(parsed.hostname)) continue;
+        origins.add(parsed.origin);
+      } catch {
+        // ignore invalid URL
+      }
+    }
+    let warmed = 0;
+    await Promise.allSettled(
+      [...origins].map(async (origin) => {
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), 3000);
+        t.unref?.();
+        try {
+          await this.fetch(origin, {
+            method: 'OPTIONS',
+            keepalive: true,
+            signal: ctrl.signal,
+          });
+          warmed += 1;
+        } catch {
+          // TLS handshake still warms the pool even if an endpoint rejects OPTIONS
+        } finally {
+          clearTimeout(t);
+        }
+      })
+    );
+    return warmed;
+  }
+
+  startConnectionWarmer(intervalMs = 15_000) {
+    if (this.connectionWarmTimer) return;
+    const tick = () => {
+      if (!this.ready()) return;
+      this.warmConnections().catch(() => {});
+    };
+    tick();
+    this.connectionWarmTimer = setInterval(tick, intervalMs);
+    this.connectionWarmTimer.unref?.();
+  }
+
+  stopConnectionWarmer() {
+    if (this.connectionWarmTimer) {
+      clearInterval(this.connectionWarmTimer);
+      this.connectionWarmTimer = null;
+    }
+  }
+
+  /**
    * One RPC read (curve, mint, wallet, wallet's token account), then a local quote. Returns null
    * when the coin can't go direct (it then uses Jupiter), or a quote shaped like Jupiter's.
    */
   async directQuote({ side, token, amountUsd, slippagePct, tokenAmount, px }) {
     const mint = token.address;
     if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(String(mint || ''))) return null;
-    if (token?.venue === 'launchlab' || token?.venue === 'pumpswap' || token?.curve?.launchlab) return null;
+    if (token?.venue === 'launchlab' || token?.venue === 'pumpswap' || token?.stage === 'graduated' || token?.curve?.launchlab) return null;
     const t0 = this.now();
     const curveAddr = PD.bondingCurveAddress(mint);
     const ataSpl = PD.ataAddress(this.address, mint, PD.TOKEN_PROGRAM);
@@ -713,13 +816,16 @@ export class RealTrader {
     if (st === 'unknown') return { unknown: true, signature: sig, error: 'sent but not confirmed in 25 s' };
     if (st === 'failed') {
       // it landed but failed: nothing changed except the network fee. Price errors are skips.
-      let code = null;
-      try {
-        const s2 = await this.rpc('getSignatureStatuses', [[sig], { searchTransactionHistory: true }]);
-        code = PD.customErrorCode(s2?.value?.[0]?.err);
-      } catch {
-        // ignore
+      let errObj = this.lastSigErrors?.get(sig) || null;
+      if (!errObj) {
+        try {
+          const s2 = await this.rpc('getSignatureStatuses', [[sig], { searchTransactionHistory: true }]);
+          errObj = s2?.value?.[0]?.err || null;
+        } catch {
+          // ignore
+        }
       }
+      const code = PD.customErrorCode(errObj);
       if (PRICE_CODES.has(code)) return { priceMoved: true, error: `pump.fun refused: price moved past the limit while sending (${code})`, signature: sig };
       return { fallback: true, sentFailed: true, signature: sig, error: `direct swap failed on-chain${code !== null ? ` (${code})` : ''}` };
     }
@@ -911,14 +1017,23 @@ export class RealTrader {
       params: [signedBase64, { encoding: 'base64', skipPreflight: true, maxRetries: 0 }],
     });
     for (const url of this.fastRpcUrls) {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), 5000);
+      t.unref?.();
       try {
-        this.fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: payload,
-        }).catch(() => {});
+        Promise.resolve(
+          this.fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: payload,
+            keepalive: true,
+            signal: ctrl.signal,
+          })
+        )
+          .catch(() => {})
+          .finally(() => clearTimeout(t));
       } catch {
-        // best-effort parallel broadcast
+        clearTimeout(t);
       }
     }
   }
@@ -945,10 +1060,15 @@ export class RealTrader {
       return this.executeNow(args);
     }
     if (!this.buyMintsInFlight) this.buyMintsInFlight = new Map();
+    if (!this.activeBuyCount) this.activeBuyCount = new Map();
     this.buyMintsInFlight.set(mint, (this.buyMintsInFlight.get(mint) || 0) + 1);
+    this.activeBuyCount.set(mint, (this.activeBuyCount.get(mint) || 0) + 1);
     try {
       return await this.executeNow(args);
     } finally {
+      const act = (this.activeBuyCount.get(mint) || 1) - 1;
+      if (act > 0) this.activeBuyCount.set(mint, act);
+      else this.activeBuyCount.delete(mint);
       // keep it marked a moment longer: the engine books the new position right after this returns
       const t = setTimeout(() => {
         const n = (this.buyMintsInFlight.get(mint) || 1) - 1;
@@ -959,7 +1079,7 @@ export class RealTrader {
     }
   }
 
-  async executeNow({ side, token, amountUsd, quote, slippagePct, tokenAmount, assetMode = 'native', newTokenAccount = false, urgent = false, positionTokens = null, deadlineAt = null }) {
+  async executeNow({ side, token, amountUsd, quote, slippagePct, tokenAmount, assetMode = 'native', newTokenAccount = false, urgent = false, positionTokens = null, deadlineAt = null, entryCeilingUsd = null }) {
     // Late-copy limit: a buy must be on its way while it can still land within the limit after the
     // trader's buy (~1 s to land). Checked here and again right before sending.
     const LAND_MS = 1000;
@@ -1015,9 +1135,9 @@ export class RealTrader {
         // if it is fresh and no other buy finished since (that buy's SOL could still be in it).
         const pre = this.prefetchedBalance;
         this.prefetchedBalance = null;
-        const usable = pre && this.now() - pre.at < 5000 && pre.at > this.lastBuyDoneAt;
+        const usable = pre && (quoteMint === WSOL_MINT || !pre.solOnly) && this.now() - pre.at < 5000 && pre.at > this.lastBuyDoneAt;
         const directBal = quote?._direct?.preLamports !== undefined && this.now() - quote.timestamp < 5000 && quote.timestamp > this.lastBuyDoneAt ? { sol: Number(quote._direct.preLamports) / LAMPORTS, usdc: this.balance?.usdc ?? 0, at: quote.timestamp } : null;
-        const bal = directBal || (usable && (await pre.promise)) || (await this.refreshBalance());
+        const bal = directBal || (usable && (await pre.promise)) || (await this.refreshBalance({ solOnly: quoteMint === WSOL_MINT }));
         if (bal.sol < needSol) return release(this.fail(`not enough SOL: wallet has ${bal.sol.toFixed(4)}, needs ${needSol.toFixed(4)} (incl. ${this.caps.reserveSol} SOL kept for fees${pendingSol > 0 ? `, ${pendingSol.toFixed(4)} SOL for buys in progress` : ''})`));
         if (quoteMint === USDC_MINT && bal.usdc < amountUsd) return release(this.fail(`not enough USDC: wallet has ${bal.usdc.toFixed(2)}`));
       } catch (err) {
@@ -1073,7 +1193,26 @@ export class RealTrader {
       let quoteMs = fresh ? quote._quoteMs ?? null : null;
       try {
         if (!fresh) {
-          const q = await this.quote({ side, token, amountUsd, slippagePct, tokenAmount, assetMode, forceJupiter: true, urgent, positionTokens });
+          let q = await this.quote({ side, token, amountUsd, slippagePct, tokenAmount, assetMode, forceJupiter: true, urgent, positionTokens });
+          // Enforce maxChasePct entryCeilingUsd on fallback / re-quoted Jupiter buys so a delayed fallback can never buy tops past maxChasePct
+          if (side === 'buy' && Number(entryCeilingUsd) > 0 && Number(q.quotedPriceUsd) > 0) {
+            const ceil = Number(entryCeilingUsd);
+            let room = (1 - Number(q.quotedPriceUsd) / ceil) * 100;
+            if (!(room >= 0.5)) {
+              this.directStats.priceSkips += 1;
+              return release({ ok: false, error: 'price moved too far before we could copy — fallback quote exceeded max chase ceiling', paper: false, priceMoved: true });
+            }
+            const curSlip = Number.isFinite(slippagePct) && slippagePct > 0 ? slippagePct : 10;
+            if (room < curSlip) {
+              const cappedSlip = Math.max(0.5, Math.floor(room * 10) / 10);
+              q = await this.quote({ side, token, amountUsd, slippagePct: cappedSlip, tokenAmount, assetMode, forceJupiter: true, urgent, positionTokens });
+              room = (1 - Number(q.quotedPriceUsd) / ceil) * 100;
+              if (!(room >= cappedSlip - 0.05)) {
+                this.directStats.priceSkips += 1;
+                return release({ ok: false, error: 'price moved too far before we could copy — fallback quote exceeded max chase ceiling', paper: false, priceMoved: true });
+              }
+            }
+          }
           order = q._order;
           quoteMs = q._quoteMs ?? null;
         }
@@ -1164,6 +1303,20 @@ export class RealTrader {
       }
       fill = { inputRaw, outputRaw, inputFeeRaw: 0n, outputFeeRaw: 0n, networkLamports: 5000, tokDec: dec, estimated: true };
     }
+    if (timing?.route !== 'direct') {
+      if (!this.mintMetaCache) this.mintMetaCache = new Map();
+      const prevMeta = this.mintMetaCache.get(mint);
+      const tokenProgram = prevMeta?.tokenProgram || token?.curve?.tokenProgram || null;
+      if (side === 'buy') {
+        const prevHeld = prevMeta?.heldRaw || 0n;
+        this.mintMetaCache.set(mint, { ...(tokenProgram ? { tokenProgram } : {}), heldRaw: prevHeld + BigInt(fill.outputRaw || 0n) });
+      } else {
+        const prevHeld = prevMeta?.heldRaw || 0n;
+        const soldRaw = BigInt(fill.inputRaw || 0n);
+        const rem = prevHeld > soldRaw ? prevHeld - soldRaw : 0n;
+        this.mintMetaCache.set(mint, { ...(tokenProgram ? { tokenProgram } : {}), heldRaw: rem });
+      }
+    }
     const quoteUsd = (raw) => (quoteMint === WSOL_MINT ? (Number(raw) / LAMPORTS) * px : Number(raw) / 1e6);
     const networkFeeUsd = (fill.networkLamports / LAMPORTS) * px;
     let result;
@@ -1245,18 +1398,25 @@ export class RealTrader {
   /** Poll signature status: 'success' | 'failed' | 'unknown'. */
   async waitForSignature(signature, maxMs) {
     const until = this.now() + maxMs;
+    let step = 0;
     while (this.now() < until) {
       try {
         const r = await this.rpc('getSignatureStatuses', [[signature], { searchTransactionHistory: true }]);
         const st = r?.value?.[0];
         if (st) {
-          if (st.err) return 'failed';
+          if (st.err) {
+            if (!this.lastSigErrors) this.lastSigErrors = new Map();
+            if (this.lastSigErrors.size > 200) this.lastSigErrors.clear();
+            this.lastSigErrors.set(signature, st.err);
+            return 'failed';
+          }
           if (st.confirmationStatus === 'confirmed' || st.confirmationStatus === 'finalized') return 'success';
         }
       } catch {
         // keep trying
       }
-      await this.sleep(100);
+      await this.sleep(step < 4 ? 35 : step < 10 ? 65 : 100);
+      step += 1;
     }
     return 'unknown';
   }
