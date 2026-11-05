@@ -29,9 +29,18 @@ const PUBLIC_DIR = path.join(__dirname, 'public');
 const envFile = loadEnvFile(path.join(__dirname, '.env'));
 const PORT = Number(process.env.PORT || 3400);
 // Hosting platforms (Railway) must reach the server from outside the container
-const ON_RAILWAY = Boolean(process.env.RAILWAY_ENVIRONMENT || process.env.RAILWAY_PUBLIC_DOMAIN || process.env.RAILWAY_PROJECT_ID);
-// Only this computer can open the terminal unless ODEX_HOST says otherwise (Settings → Security)
-const HOST = process.env.ODEX_HOST || (ON_RAILWAY ? '0.0.0.0' : '127.0.0.1');
+const ON_RAILWAY = Boolean(
+  process.env.RAILWAY_ENVIRONMENT ||
+  process.env.RAILWAY_ENVIRONMENT_NAME ||
+  process.env.RAILWAY_ENVIRONMENT_ID ||
+  process.env.RAILWAY_PUBLIC_DOMAIN ||
+  process.env.RAILWAY_PROJECT_ID ||
+  process.env.RAILWAY_SERVICE_ID ||
+  process.env.RAILWAY_DEPLOYMENT_ID ||
+  process.env.RAILWAY_STATIC_URL
+);
+// Only this computer can open the terminal unless running in a container / Railway / PORT specified
+const HOST = process.env.ODEX_HOST || (ON_RAILWAY || process.env.PORT ? '0.0.0.0' : '127.0.0.1');
 // Optional site password (HTTP Basic auth, any username). Set it on any public deploy.
 const SITE_PASSWORD = process.env.ODEX_PASSWORD || '';
 function passwordOk(req) {
@@ -682,6 +691,7 @@ function isAllowedHost(hostHeader) {
   const host = String(hostHeader || '').replace(/:\d+$/, '').replace(/^\[|\]$/g, '').toLowerCase();
   if (!host) return true; // non-browser clients
   if (host === 'localhost' || /^\d{1,3}(\.\d{1,3}){3}$/.test(host) || host.includes(':')) return true;
+  if (host.endsWith('.railway.app') || host.endsWith('.up.railway.app') || host.endsWith('.railway.internal')) return true;
   const extra = String(process.env.ODEX_ALLOWED_HOSTS || '').toLowerCase().split(',').map((s) => s.trim()).filter(Boolean);
   if (process.env.RAILWAY_PUBLIC_DOMAIN) extra.push(String(process.env.RAILWAY_PUBLIC_DOMAIN).toLowerCase());
   return extra.includes(host);
