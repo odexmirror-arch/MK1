@@ -4,9 +4,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { CopyTradingEngine, createDefaultExitRules, recommendedExitRules, fastScalpExitRules, followTraderExitRules, activeExitRuleCount, createDefaultUiSettings } from './engine/copyEngine.mjs';
-import { CHAINS } from './engine/chainAdapters.mjs';
+import { CHAINS, paperDelayMsFor } from './engine/chainAdapters.mjs';
 import { LiveSignalService } from './engine/liveSignals.mjs';
 import { isSolanaAddress } from './engine/walletWatcher.mjs';
+import { toWsUrl } from './engine/walletStream.mjs';
 import { loadEnvFile, redact } from './engine/env.mjs';
 import { AlchemyService } from './engine/alchemy.mjs';
 import { OnchainMetadata } from './engine/onchainMeta.mjs';
@@ -16,7 +17,7 @@ import { PersistenceManager, serializeEngine, serializeLive } from './engine/per
 import { SupabaseMirror, SUPABASE_TABLE_SQL, isSupabaseUrl } from './engine/supabase.mjs';
 import fsSync from 'node:fs';
 import zlib from 'node:zlib';
-import { RealTrader } from './engine/realTrader.mjs';
+import { RealTrader, priorityMicroLamportsFor } from './engine/realTrader.mjs';
 import { Notifier } from './engine/notifier.mjs';
 import { buildDaxReport } from './engine/dax.mjs';
 import { DaxChat, smartDaxAnswer, periodFromQuestion } from './engine/daxChat.mjs';
@@ -129,10 +130,12 @@ const sodaeKeyOnly = (() => {
     return null;
   }
 })();
+const heliusConfirmWs = heliusApiKey ? `wss://mainnet.helius-rpc.com/?api-key=${heliusApiKey}` : toWsUrl(liveSignals.watcher.rpcUrl);
 export const realTrader = new RealTrader({
   env: process.env,
   rpc: (method, params) => liveSignals.watcher.rpc(method, params, { fast: true }),
   fastRpcUrls: [heliusStakedRpc, heliusFastRpc, liveSignals.watcher.rpcUrl, ...jitoEndpoints, sodaeRpc].filter(Boolean),
+  confirmWsUrl: heliusConfirmWs,
   solPrice: () => (solPriceLive ? CHAINS.solana.nativePriceUsd : 0),
   state: db ? db.get('realTrader') : null,
   onChange: () => {
@@ -150,22 +153,24 @@ realTrader.capsOverride = () => engine.settings.realCaps || null;
 // Swap route (Settings → Trading & risk): Jupiter (default) or direct pump.fun with Jupiter fallback.
 // ODEX_SWAP_ROUTE=jupiter on Railway forces Jupiter whatever the setting says (emergency switch).
 realTrader.routeSetting = () => (process.env.ODEX_SWAP_ROUTE === 'jupiter' ? 'jupiter' : engine.settings.swapRoute === 'direct' ? 'direct' : 'jupiter');
-// Fast trade detection (Settings → Trading & risk): pump.fun trades read from the pushed logs.
+// Fast trade detection (Settings → Trading & risk): pump.fun + PumpSwap trades read from the pushed logs.
 // ODEX_FAST_DETECT=off on Railway turns it off whatever the setting says (emergency switch).
 liveSignals.watcher.fastDetect = () => process.env.ODEX_FAST_DETECT !== 'off' && engine.settings.fastDetect === true;
-realTrader.priorityMicroLamports = () => Number(process.env.ODEX_DIRECT_PRIORITY_MICROLAMPORTS || 100_000);
+liveSignals.watcher.onWalletTx = (address, ev) => {
+  if (realTrader.address && address === realTrader.address && ev?.signature && ev?.tx) {
+    realTrader.cacheOwnTransaction(ev.signature, ev.tx);
+  }
+};
+realTrader.priorityMicroLamports = (units, _side, tradeSol) =>
+  priorityMicroLamportsFor(engine.settings.priorityFee, units, process.env.ODEX_DIRECT_PRIORITY_MICROLAMPORTS, { tradeSol });
 realTrader.startBlockhashWarmer();
 realTrader.startConnectionWarmer();
 
 engine.adapter.liveHooks = realTrader.hooks();
-// Paper Mode on Solana: match real-SOL execution time (~700 ms on direct pump.fun curve, ~1,000 ms on Jupiter)
+// Paper Mode on Solana: match real-SOL confirmed execution (~650–850 ms on direct pump.fun curve, ~950–1,000 ms on Jupiter)
 // and re-read the live on-chain curve price when the swap lands so paper fills see the same post-delay price.
-engine.adapter.paperDelayMs = ({ chainId, token }) => {
-  if (chainId !== 'solana') return 0;
-  const isDirectCurve = realTrader.routeSetting() === 'direct' && (token?.stage === 'pre-grad' || token?.venue === 'pumpfun');
-  if (isDirectCurve && Number(token?.curve?.virtualSolReserves) > 0) return 250;
-  return isDirectCurve ? 700 : 1000;
-};
+engine.adapter.paperDelayMs = ({ chainId, side, token }) =>
+  paperDelayMsFor({ chainId, side, token, swapRoute: realTrader.routeSetting() });
 engine.adapter.paperLiveFillPrice = async ({ chainId, side, token, fillPriceUsd }) => {
   if (chainId !== 'solana' || !token?.address || typeof engine.curveSource !== 'function') return fillPriceUsd;
   const curves = await engine.curveSource([token.address]);

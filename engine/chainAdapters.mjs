@@ -140,6 +140,26 @@ export function solanaTradeFeePct(token = {}, now = Date.now()) {
   return { venuePct, routerPct, totalPct: venuePct + routerPct };
 }
 
+/**
+ * Realistic Solana Paper Mode swap confirmation delay (ms) matching live `confirmed` execution:
+ * never sub-slot (<400 ms), so Paper Mode cannot open & close phantom scalps faster than 1.5 Solana slots.
+ */
+export function paperDelayMsFor({ chainId, side = 'buy', token = null, swapRoute = 'jupiter' } = {}) {
+  if (chainId !== 'solana') return 0;
+  const isDirectCurve =
+    swapRoute === 'direct' &&
+    token?.venue !== 'launchlab' &&
+    token?.venue !== 'pumpswap' &&
+    token?.stage !== 'graduated' &&
+    !token?.curve?.launchlab &&
+    (token?.stage === 'pre-grad' || token?.venue === 'pumpfun');
+  if (isDirectCurve && Number(token?.curve?.virtualSolReserves) > 0) {
+    return side === 'sell' ? 750 : 650;
+  }
+  if (isDirectCurve) return side === 'sell' ? 850 : 750;
+  return side === 'sell' ? 1000 : 950;
+}
+
 export class ChainExecutionAdapter {
   constructor(options = {}) {
     this.mode = options.mode || 'paper'; // 'paper' | 'live'

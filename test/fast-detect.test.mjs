@@ -4,7 +4,19 @@ process.env.ODEX_RPC_MAX_RPS = '0';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
-import { pumpTradeFromLogs, swapFromPumpTrade, decodeTradeEvent, PUMP_PROGRAM, RAYDIUM_LAUNCHLAB_PROGRAM } from '../engine/pumpLogs.mjs';
+import {
+  pumpTradeFromLogs,
+  swapFromPumpTrade,
+  pumpSwapTradeFromLogs,
+  swapFromPumpSwapTrade,
+  decodeTradeEvent,
+  PUMP_PROGRAM,
+  PUMP_AMM_PROGRAM,
+  RAYDIUM_LAUNCHLAB_PROGRAM,
+  PUMP_SWAP_BUY_EVENT,
+  PUMP_SWAP_SELL_EVENT,
+  PUMP_SWAP_POOL_DISC,
+} from '../engine/pumpLogs.mjs';
 import { SolanaWalletWatcher } from '../engine/walletWatcher.mjs';
 import { base58Encode, base58Decode, findProgramAddress } from '../engine/onchainMeta.mjs';
 import { CopyTradingEngine } from '../engine/copyEngine.mjs';
@@ -331,5 +343,134 @@ test('FD14 a trade through Raydium LaunchLab (PumpSwap) is decoded via fast-logs
   const s = swapFromPumpTrade(r.trade);
   assert.equal(s.venue, 'pumpswap');
   assert.equal(s.side, 'buy');
+});
+
+function pumpSwapEventB64({
+  isBuy = true,
+  baseAmount = 3_964_618_653n,
+  userBaseBefore = isBuy ? 0n : 3_964_618_653n,
+  quoteAmount = isBuy ? 83_840_884n : 100_506_713n,
+  userQuoteAmount = isBuy ? 84_553_533n : 99_702_658n,
+  pool = OTHER,
+  user = TRADER,
+} = {}) {
+  return Buffer.concat([
+    isBuy ? PUMP_SWAP_BUY_EVENT : PUMP_SWAP_SELL_EVENT,
+    u64(1_793_828_142n), // timestamp
+    u64(baseAmount),
+    u64(userQuoteAmount), // max_quote_in / min_quote_out
+    u64(userBaseBefore),
+    u64(isBuy ? userQuoteAmount : 0n),
+    u64(31_455_230_775_549n), // pool_base_token_reserves
+    u64(655_270_467_691n), // pool_quote_token_reserves
+    u64(quoteAmount),
+    u64(20n),
+    u64(167_682n),
+    u64(5n),
+    u64(41_921n),
+    u64(quoteAmount),
+    u64(userQuoteAmount),
+    pk(pool),
+    pk(user),
+    pk(OTHER),
+    pk(OTHER),
+  ]).toString('base64');
+}
+
+function pumpSwapLogs(eventB64, prog = PUMP_AMM_PROGRAM) {
+  return [
+    'Program ComputeBudget111111111111111111111111111111 invoke [1]',
+    'Program ComputeBudget111111111111111111111111111111 success',
+    `Program ${prog} invoke [1]`,
+    'Program log: Instruction: Buy',
+    `Program data: ${eventB64}`,
+    `Program ${prog} success`,
+  ];
+}
+
+test('FD15 PumpSwap BuyEvent & SellEvent decode from processed logs with exact heldBefore / sellSharePct and reject forged events', () => {
+  const buyRes = pumpSwapTradeFromLogs(pumpSwapLogs(pumpSwapEventB64({ isBuy: true, userBaseBefore: 0n })), TRADER);
+  assert.ok(buyRes.trade, buyRes.skip);
+  const buySwap = swapFromPumpSwapTrade(buyRes.trade, { baseMint: MINT, quoteMint: WSOL, decimals: 6 }, { signature: 'ps-b1' });
+  assert.equal(buySwap.side, 'buy');
+  assert.equal(buySwap.venue, 'pumpswap');
+  assert.equal(buySwap.tokenMint, MINT);
+  assert.equal(buySwap.heldBefore, 0);
+  assert.ok(Math.abs(buySwap.tokenAmount - 3964.618653) < 1e-6);
+  assert.ok(Math.abs(buySwap.poolQuoteAmount - 0.083840884) < 1e-9);
+  assert.ok(Math.abs(buySwap.quoteAmount - 0.084553533) < 1e-9);
+
+  // Partial sell (sold 1,000 of 4,000 tokens = 25% share, no ATA balance RPC needed!)
+  const sellRes = pumpSwapTradeFromLogs(
+    pumpSwapLogs(pumpSwapEventB64({ isBuy: false, baseAmount: 1_000_000_000n, userBaseBefore: 4_000_000_000n })),
+    TRADER
+  );
+  assert.ok(sellRes.trade, sellRes.skip);
+  const sellSwap = swapFromPumpSwapTrade(sellRes.trade, { baseMint: MINT, quoteMint: WSOL, decimals: 6 }, { signature: 'ps-s1' });
+  assert.equal(sellSwap.side, 'sell');
+  assert.equal(sellSwap.sellSharePct, 25);
+
+  // Forged event written outside PUMP_AMM_PROGRAM invoke frame is rejected
+  const forged = pumpSwapTradeFromLogs(pumpSwapLogs(pumpSwapEventB64(), EVIL), TRADER);
+  assert.equal(forged.trade, undefined);
+  assert.equal(forged.forged, true);
+});
+
+test('FD16 watcher: PumpSwap WS logs emit fast-logs signal without getTransaction and cache pool for 0-RPC subsequent buys/sells', async () => {
+  const poolAddr = OTHER;
+  const pumpMint = `${MINT.slice(0, 40)}pump`;
+  const poolBuf = Buffer.alloc(301);
+  PUMP_SWAP_POOL_DISC.copy(poolBuf, 0);
+  pk(pumpMint).copy(poolBuf, 43);
+  pk(WSOL).copy(poolBuf, 75);
+
+  const got = [];
+  const rpcCalls = [];
+  const w = new SolanaWalletWatcher({
+    fetchImpl: async () => new Response('{}'),
+    tokenInfo: { cache: new Map(), get: async () => null, solPriceFast: async () => 200, solPriceUsd: async () => 200 },
+    onSignal: (s) => got.push({ ...s, callsAtSignal: [...rpcCalls] }),
+  });
+  w.onTokenInfoLate = () => {};
+  w.running = true;
+  w.wallets.set(TRADER, { address: TRADER, label: 'decu', mode: 'full' });
+  w.fastDetect = () => true;
+  w.confirmDelaysMs = [];
+  w.rpc = async (method, params) => {
+    rpcCalls.push(method);
+    if (method === 'getAccountInfo' && params[0] === poolAddr) {
+      return { value: { owner: PUMP_AMM_PROGRAM, data: [poolBuf.toString('base64'), 'base64'] } };
+    }
+    if (method === 'getSignatureStatuses') return { value: [{ confirmationStatus: 'confirmed', err: null }] };
+    return null;
+  };
+
+  // First swap on pool: 1 processed getAccountInfo, 0 getTransaction
+  w.handleStreamLogs(TRADER, {
+    signature: 'ps-ws-buy',
+    err: null,
+    logs: pumpSwapLogs(pumpSwapEventB64({ isBuy: true, pool: poolAddr })),
+    receivedAt: Date.now(),
+  });
+  await until(() => got.length === 1);
+  assert.equal(got[0].via, 'fast-logs');
+  assert.equal(got[0].venue, 'pumpswap');
+  assert.equal(got[0].side, 'buy');
+  assert.equal(got[0].tokenMint, pumpMint);
+  assert.deepEqual(got[0].callsAtSignal, ['getAccountInfo'], 'only 1 pool lookup on first swap, zero getTransaction');
+  assert.equal(w.fastStats.misses, 0, 'zero false fast-detect misses on PumpSwap');
+
+  // Second swap (sell!) on same pool: 0 RPC calls before signal!
+  rpcCalls.length = 0;
+  w.handleStreamLogs(TRADER, {
+    signature: 'ps-ws-sell',
+    err: null,
+    logs: pumpSwapLogs(pumpSwapEventB64({ isBuy: false, pool: poolAddr })),
+    receivedAt: Date.now(),
+  });
+  await until(() => got.length === 2);
+  assert.equal(got[1].side, 'sell');
+  assert.equal(got[1].sellSharePct, 100);
+  assert.deepEqual(got[1].callsAtSignal, [], '0 RPC calls on cached PumpSwap pool sell');
 });
 

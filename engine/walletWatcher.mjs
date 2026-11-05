@@ -19,7 +19,7 @@ export function isPumpFunCoin(swap) {
   return Boolean(swap && /pump$/.test(String(swap.tokenMint || '')) && (swap.venue === 'pumpfun' || swap.venue === 'pumpswap'));
 }
 import { bondingCurvePda, RAYDIUM_LAUNCHLAB_PROGRAM } from './pumpCurve.mjs';
-import { pumpTradeFromLogs, swapFromPumpTrade, launchLabTradeFromLogs, FAST_TRADE_PROGRAMS } from './pumpLogs.mjs';
+import { pumpTradeFromLogs, swapFromPumpTrade, pumpSwapTradeFromLogs, swapFromPumpSwapTrade, decodePumpSwapPool, launchLabTradeFromLogs } from './pumpLogs.mjs';
 import { YellowstoneFeed } from './yellowstone.mjs';
 import { findProgramAddress, base58Decode as b58d } from './onchainMeta.mjs';
 const ASSOCIATED_TOKEN_PROGRAM = 'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL';
@@ -507,6 +507,8 @@ export class SolanaWalletWatcher {
     // Fast trade detection (Settings): read pump.fun trades from the pushed logs, confirm later
     this.fastDetect = () => false;
     this.onPhantomTrade = null; // ({ signature, wallet, side, mint, reason }) → close the copy
+    this.onWalletTx = null; // optional hook (address, ev) when a full pushed tx arrives
+    this.pumpSwapPoolCache = new Map(); // pool pubkey -> { baseMint, quoteMint, decimals }
     this.fastStats = { hits: 0, misses: 0, forged: 0, confirmed: 0, phantoms: 0, missReasons: {}, lagMs: [], lastPhantom: null };
     this.confirmDelaysMs = [1500, 2500, 4000, 6000, 10_000, 15_000, 20_000];
     this.stream = new WalletStream({
@@ -718,6 +720,13 @@ export class SolanaWalletWatcher {
       if (!ev.err) this.feedRace[feed] = (this.feedRace[feed] || 0) + 1;
       if (this.firstSeenBy.size > 3000) this.firstSeenBy = new Map([...this.firstSeenBy].slice(-1500));
     }
+    if (!ev.err && ev.tx && typeof this.onWalletTx === 'function') {
+      try {
+        this.onWalletTx(address, ev);
+      } catch {
+        // ignore listener errors
+      }
+    }
     if (ev.err) {
       this.streamStats.failedTx += 1; // failed transaction (spam floods are mostly these)
       return;
@@ -728,12 +737,9 @@ export class SolanaWalletWatcher {
       return;
     }
     this.streamStats.swapsSeen += 1;
-    const hasFastLogsProgram = Array.isArray(ev.logs) && ev.logs.some((l) => {
-      const s = String(l);
-      for (const p of FAST_TRADE_PROGRAMS) if (s.includes(p)) return true;
-      return false;
-    });
-    if (this.fastDetect() && hasFastLogsProgram) {
+    const hasPumpCurveLog = Array.isArray(ev.logs) && ev.logs.some((l) => String(l).includes(PUMP_CURVE_PROGRAM));
+    const hasPumpSwapLog = Array.isArray(ev.logs) && ev.logs.some((l) => String(l).includes(PUMP_AMM_PROGRAM));
+    if (this.fastDetect() && hasPumpCurveLog) {
       const r = pumpTradeFromLogs(ev.logs, address, { err: ev.err });
       if (r.trade) {
         this.fastTrade(w, ev, r.trade);
@@ -762,10 +768,98 @@ export class SolanaWalletWatcher {
       this.fastTxTrade(w, ev, swap);
       return;
     }
+    if (this.fastDetect() && hasPumpSwapLog) {
+      const ps = pumpSwapTradeFromLogs(ev.logs, address, { err: ev.err });
+      if (ps.trade) {
+        this.fastPumpSwapTrade(w, ev, ps.trade);
+        return;
+      }
+      if (ps.forged) this.fastStats.forged += 1;
+      this.fastStats.misses += 1;
+      this.fastStats.missReasons[ps.skip] = (this.fastStats.missReasons[ps.skip] || 0) + 1;
+    }
     if (w.mode === 'balances' && this.fastDetect()) return;
     this.streamQueue.push({ w, ev });
     if (this.streamQueue.length > 200) this.streamQueue.splice(0, this.streamQueue.length - 200);
     this.drainStream();
+  }
+
+  /** Resolve and cache { baseMint, quoteMint, decimals } for a PumpSwap pool account. */
+  async resolvePumpSwapPool(pool) {
+    const hit = this.pumpSwapPoolCache.get(pool);
+    if (hit) return hit;
+    const acc = await this.rpc('getAccountInfo', [pool, { encoding: 'base64', commitment: 'processed' }], { fast: true });
+    const val = acc?.value;
+    if (!val || val.owner !== PUMP_AMM_PROGRAM) return null;
+    const decoded = decodePumpSwapPool(val.data?.[0]);
+    if (!decoded) return null;
+    const mint = decoded.quoteMint === WSOL_MINT ? decoded.baseMint : decoded.baseMint === WSOL_MINT ? decoded.quoteMint : null;
+    let decimals = 6;
+    if (mint && !/pump$/i.test(mint)) {
+      try {
+        const mAcc = await this.rpc('getAccountInfo', [mint, { encoding: 'base64', commitment: 'processed' }], { fast: true });
+        const mb = mAcc?.value?.data?.[0] ? Buffer.from(mAcc.value.data[0], 'base64') : null;
+        if (mb && mb.length >= 45 && mb[44] <= 18) decimals = mb[44];
+      } catch {
+        // default 6
+      }
+    }
+    const info = { ...decoded, decimals };
+    if (this.pumpSwapPoolCache.size > 2000) {
+      this.pumpSwapPoolCache = new Map([...this.pumpSwapPoolCache].slice(-1000));
+    }
+    this.pumpSwapPoolCache.set(pool, info);
+    return info;
+  }
+
+  /** Fast path for a PumpSwap BuyEvent/SellEvent decoded from `processed` WebSocket logs. */
+  async fastPumpSwapTrade(w, ev, trade) {
+    const sig = ev.signature;
+    if (this.seenSigs.has(sig)) return null;
+    let poolInfo = null;
+    try {
+      poolInfo = await this.resolvePumpSwapPool(trade.pool);
+    } catch {
+      poolInfo = null;
+    }
+    if (this.seenSigs.has(sig)) return null;
+    if (!poolInfo) {
+      this.fastStats.misses += 1;
+      this.fastStats.missReasons['pool lookup failed'] = (this.fastStats.missReasons['pool lookup failed'] || 0) + 1;
+      this.streamQueue.push({ w, ev });
+      this.drainStream();
+      return null;
+    }
+    const swap = swapFromPumpSwapTrade(trade, poolInfo, { signature: sig, slot: ev.slot ?? null, receivedAt: ev.receivedAt || Date.now() });
+    if (!swap || swap.skip) {
+      if (swap?.skip) {
+        this.fastStats.misses += 1;
+        this.fastStats.missReasons[swap.skip] = (this.fastStats.missReasons[swap.skip] || 0) + 1;
+      }
+      if (swap?.nonSolBuy) this.seenSigs.add(sig);
+      else if (!swap?.skip) {
+        this.streamQueue.push({ w, ev });
+        this.drainStream();
+      }
+      return null;
+    }
+    this.fastStats.hits += 1;
+    let signal = null;
+    try {
+      signal = await this.processSignature(w, sig, { backfill: false, via: 'fast-logs', receivedAt: ev.receivedAt, knownSwap: swap });
+    } catch {
+      this.seenSigs.delete(sig);
+      return null;
+    }
+    if (signal) {
+      this.streamStats.signals += 1;
+      if (signal.streamMs != null) {
+        this.fastStats.lagMs.push(signal.streamMs);
+        if (this.fastStats.lagMs.length > 50) this.fastStats.lagMs.shift();
+      }
+      this.confirmFastTrade(w, sig, swap).catch(() => {});
+    }
+    return signal;
   }
 
   /** Fast path for a full transaction delivered at `processed` commitment over Yellowstone gRPC. */
@@ -1207,7 +1301,7 @@ export class SolanaWalletWatcher {
     // details are not worth waiting for: market cap comes from the trader's own fill price.
     const pumpCoin = isPumpFunCoin(swap) || swap.venue === 'launchlab' || (via === 'fast-logs' && Boolean(swap.curve));
     const liveStream = via === 'fast-logs' || via === 'stream' || via === 'token-stream';
-    const useFastInfoCache = !backfill && liveStream && Boolean(swap.curve) && this.tokenInfo?.cache instanceof Map;
+    const useFastInfoCache = !backfill && liveStream && (Boolean(swap.curve) || isPumpFunCoin(swap)) && this.tokenInfo?.cache instanceof Map;
     const fastCachedHit = useFastInfoCache ? this.tokenInfo.cache.get(swap.tokenMint) : null;
     const budgetMs = pumpCoin ? Math.min(this.tokenInfoBudgetMs, this.pumpInfoBudgetMs) : this.tokenInfoBudgetMs;
     const infoPromise = this.tokenInfo.get(swap.tokenMint);

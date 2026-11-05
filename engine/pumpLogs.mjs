@@ -21,6 +21,9 @@ export const FAST_TRADE_PROGRAMS = new Set([PUMP_PROGRAM, PUMP_AMM_PROGRAM, RAYD
 const WSOL_MINT = 'So11111111111111111111111111111111111111112';
 const ZERO_KEY = '11111111111111111111111111111111';
 const TRADE_EVENT = Buffer.from([189, 219, 127, 211, 78, 230, 97, 238]);
+export const PUMP_SWAP_BUY_EVENT = Buffer.from([103, 244, 82, 31, 44, 245, 119, 119]);
+export const PUMP_SWAP_SELL_EVENT = Buffer.from([62, 47, 55, 10, 165, 3, 220, 42]);
+export const PUMP_SWAP_POOL_DISC = Buffer.from([241, 154, 109, 4, 17, 177, 109, 188]);
 // events that mean the trade was not a plain curve trade (curve completed / synthetic migration)
 const COMPLETE_EVENT = Buffer.from('X3JhnNQumAg=', 'base64');
 const POST_COMPLETE_BUY_EVENT = Buffer.from('b7BtizFs1fs=', 'base64');
@@ -278,6 +281,7 @@ export function pumpTradeFromLogs(logs, trader, { err = null } = {}) {
       if (isTrade) return { skip: 'trade record written by another program (ignored)', forged: true };
       continue;
     }
+    if (activeProg === RAYDIUM_LAUNCHLAB_PROGRAM && data.length === 147) continue;
     if (isComplete) {
       complete = true;
       continue;
@@ -300,6 +304,191 @@ export function pumpTradeFromLogs(logs, trader, { err = null } = {}) {
   if (t.solAmount <= 0n || t.tokenAmount <= 0n) return { skip: 'empty trade' };
   if (seenTokenProgram && !t.tokenProgram) t.tokenProgram = seenTokenProgram;
   return { trade: t };
+}
+
+/**
+ * Decode a PumpSwap (pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA) Pool account (base64 or Buffer)
+ * into { baseMint, quoteMint }. Returns null when the buffer is not a valid PumpSwap Pool.
+ */
+export function decodePumpSwapPool(raw) {
+  const b = Buffer.isBuffer(raw) ? raw : typeof raw === 'string' ? Buffer.from(raw, 'base64') : null;
+  if (!b || b.length < 107 || !b.subarray(0, 8).equals(PUMP_SWAP_POOL_DISC)) return null;
+  return {
+    baseMint: base58Encode(b.subarray(43, 75)),
+    quoteMint: base58Encode(b.subarray(75, 107)),
+  };
+}
+
+/**
+ * Decode a PumpSwap BuyEvent or SellEvent body (after the 8-byte discriminator, >=240 bytes).
+ */
+export function decodePumpSwapEvent(body, isBuy) {
+  if (!body || body.length < 240) throw new Error('short pumpswap event');
+  const r = reader(body);
+  const timestamp = r.i64();
+  const baseAmount = r.u64(); // base_amount_out (buy) / base_amount_in (sell)
+  const limitQuoteAmount = r.u64(); // max_quote_amount_in / min_quote_amount_out
+  const userBaseTokenReserves = r.u64(); // user base balance BEFORE this swap
+  const userQuoteTokenReserves = r.u64(); // user quote balance BEFORE this swap
+  const poolBaseTokenReserves = r.u64(); // pool base reserves BEFORE this swap
+  const poolQuoteTokenReserves = r.u64(); // pool quote reserves BEFORE this swap
+  const quoteAmount = r.u64(); // pool quote leg (quote_amount_in / quote_amount_out)
+  const lpFeeBps = r.u64();
+  const lpFee = r.u64();
+  const protocolFeeBps = r.u64();
+  const protocolFee = r.u64();
+  const quoteAmountWithLpFee = r.u64();
+  const userQuoteAmount = r.u64(); // user_quote_amount_in / user_quote_amount_out (all fees included)
+  const pool = r.pubkey();
+  const user = r.pubkey();
+  const userBaseTokenAccount = r.pubkey();
+  const userQuoteTokenAccount = r.pubkey();
+  return {
+    isBuy: Boolean(isBuy),
+    timestamp,
+    baseAmount,
+    limitQuoteAmount,
+    userBaseTokenReserves,
+    userQuoteTokenReserves,
+    poolBaseTokenReserves,
+    poolQuoteTokenReserves,
+    quoteAmount,
+    lpFeeBps,
+    lpFee,
+    protocolFeeBps,
+    protocolFee,
+    quoteAmountWithLpFee,
+    userQuoteAmount,
+    pool,
+    user,
+    userBaseTokenAccount,
+    userQuoteTokenAccount,
+  };
+}
+
+/**
+ * Extract the trader's verified PumpSwap (pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA) BuyEvent or
+ * SellEvent from pushed logs at `processed` commitment, with strict runtime invoke-stack checks.
+ */
+export function pumpSwapTradeFromLogs(logs, trader, { err = null } = {}) {
+  if (err) return { skip: 'failed transaction' };
+  if (!Array.isArray(logs) || !logs.length) return { skip: 'no logs' };
+  const stack = [];
+  const trades = [];
+  let complete = false;
+  for (const raw of logs) {
+    const line = String(raw);
+    if (/^Log truncated/i.test(line)) return { skip: 'logs truncated' };
+    let m = INVOKE_RE.exec(line);
+    if (m) {
+      if (Number(m[2]) !== stack.length + 1) return { skip: 'invoke stack out of order' };
+      stack.push(m[1]);
+      continue;
+    }
+    m = END_RE.exec(line);
+    if (m) {
+      if (stack[stack.length - 1] !== m[1]) return { skip: 'invoke stack out of order' };
+      if (m[2] !== 'success') return { skip: 'a program failed' };
+      stack.pop();
+      continue;
+    }
+    m = DATA_RE.exec(line);
+    if (!m) continue;
+    let data;
+    try {
+      data = Buffer.from(m[1], 'base64');
+    } catch {
+      continue;
+    }
+    if (data.length < 8) continue;
+    const disc = data.subarray(0, 8);
+    if (disc.equals(COMPLETE_EVENT) || disc.equals(POST_COMPLETE_BUY_EVENT)) {
+      if (stack[stack.length - 1] === PUMP_PROGRAM) complete = true;
+      continue;
+    }
+    const isBuy = disc.equals(PUMP_SWAP_BUY_EVENT);
+    const isSell = !isBuy && disc.equals(PUMP_SWAP_SELL_EVENT);
+    if (!isBuy && !isSell) continue;
+    const activeProg = stack[stack.length - 1];
+    if (activeProg !== PUMP_AMM_PROGRAM) {
+      return { skip: 'trade record written by another program (ignored)', forged: true };
+    }
+    let ev;
+    try {
+      ev = decodePumpSwapEvent(data.subarray(8), isBuy);
+    } catch {
+      return { skip: 'trade record unreadable' };
+    }
+    if (ev.user === trader) trades.push(ev);
+  }
+  if (stack.length) return { skip: 'logs incomplete' };
+  if (!trades.length) return { skip: 'no pumpswap trade by this wallet' };
+  if (trades.length > 1) return { skip: 'several trades in one transaction' };
+  if (complete) return { skip: 'curve completed in this transaction' };
+  const t = trades[0];
+  if (t.baseAmount <= 0n || t.quoteAmount <= 0n) return { skip: 'empty trade' };
+  return { trade: t };
+}
+
+/**
+ * Convert a decoded PumpSwap event + resolved pool mints ({ baseMint, quoteMint, decimals }) into
+ * the watcher's standard swap shape (including heldBefore and sellSharePct without extra RPC reads).
+ */
+export function swapFromPumpSwapTrade(t, poolInfo, { signature, slot = null, receivedAt = Date.now() } = {}) {
+  if (!t || !poolInfo?.baseMint || !poolInfo?.quoteMint) return null;
+  const { baseMint, quoteMint } = poolInfo;
+  const decimals = Number.isInteger(poolInfo.decimals) ? poolInfo.decimals : 6;
+  let isBuy;
+  let tokenMint;
+  let tokenRaw;
+  let poolSolLamports;
+  let walletSolLamports;
+  let heldBeforeRaw;
+  if (quoteMint === WSOL_MINT && baseMint !== WSOL_MINT) {
+    isBuy = Boolean(t.isBuy);
+    tokenMint = baseMint;
+    tokenRaw = t.baseAmount;
+    poolSolLamports = t.quoteAmount;
+    walletSolLamports = t.userQuoteAmount > 0n ? t.userQuoteAmount : t.quoteAmount;
+    heldBeforeRaw = t.userBaseTokenReserves;
+  } else if (baseMint === WSOL_MINT && quoteMint !== WSOL_MINT) {
+    isBuy = !t.isBuy;
+    tokenMint = quoteMint;
+    tokenRaw = t.userQuoteAmount > 0n ? t.userQuoteAmount : t.quoteAmount;
+    poolSolLamports = t.baseAmount;
+    walletSolLamports = t.baseAmount;
+    heldBeforeRaw = t.userQuoteTokenReserves;
+  } else {
+    return { skip: 'coin not priced in SOL', nonSolBuy: Boolean(t.isBuy) };
+  }
+  const scale = 10 ** decimals;
+  const tokenAmount = Number(tokenRaw) / scale;
+  const poolSol = Number(poolSolLamports) / 1e9;
+  const walletSol = Number(walletSolLamports) / 1e9;
+  if (!(tokenAmount > 0) || !(poolSol > 0)) return null;
+  const heldBefore = Number(heldBeforeRaw) / scale;
+  let sellSharePct = null;
+  if (!isBuy) {
+    sellSharePct = heldBeforeRaw > 0n ? Math.min(100, Number(((Number(tokenRaw) / Number(heldBeforeRaw)) * 100).toFixed(2))) : 100;
+  }
+  return {
+    side: isBuy ? 'buy' : 'sell',
+    sellSharePct,
+    heldBefore,
+    tokenMint,
+    tokenDecimals: decimals,
+    tokenAmount,
+    quoteSymbol: 'SOL',
+    quoteMint: WSOL_MINT,
+    quoteAmount: walletSol,
+    priceInQuote: poolSol / tokenAmount,
+    poolQuoteAmount: poolSol,
+    signature,
+    slot,
+    blockTime: Number(t.timestamp) > 0 ? Math.min(receivedAt, Number(t.timestamp) * 1000) : receivedAt,
+    venue: 'pumpswap',
+    fastDetect: true,
+  };
 }
 
 /**

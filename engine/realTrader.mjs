@@ -24,6 +24,35 @@ const LAMPORTS = 1_000_000_000;
 const PKCS8_ED25519_PREFIX = Buffer.from('302e020100300506032b657004220420', 'hex');
 const DAY_MS = 86_400_000;
 
+/**
+ * Convert dashboard Priority Fee setting ({ mode: 'normal'|'fast'|'turbo'|'custom', customSol })
+ * into compute-unit price (microLamports per CU) for a given CU limit, with safe ceiling clamping.
+ * When `tradeSol` is provided on 'fast' or 'turbo' presets, caps priority spend proportionally on
+ * small swaps (e.g. ~0.00025–0.00035 SOL on an $8 / ~0.083 SOL trade) so priority fees never eat TP.
+ */
+export function priorityMicroLamportsFor(priorityFee, cuUnits = 100_000, envOverride = null, { tradeSol = null } = {}) {
+  if (envOverride !== null && envOverride !== undefined && String(envOverride).trim() !== '') {
+    const ov = Number(envOverride);
+    if (Number.isFinite(ov) && ov > 0) return Math.floor(ov);
+  }
+  if (!priorityFee || !priorityFee.mode) return 100_000;
+  let targetSol = 0.0002;
+  if (priorityFee.mode === 'fast') targetSol = 0.001;
+  else if (priorityFee.mode === 'turbo') targetSol = 0.005;
+  else if (priorityFee.mode === 'custom') {
+    const c = Number(priorityFee.customSol);
+    targetSol = Number.isFinite(c) && c > 0 ? Math.min(0.01, Math.max(0.00005, c)) : 0.002;
+  }
+  const sz = Number(tradeSol);
+  if (Number.isFinite(sz) && sz > 0 && (priorityFee.mode === 'fast' || priorityFee.mode === 'turbo')) {
+    const sizeCap = priorityFee.mode === 'turbo' ? Math.max(0.00035, sz * 0.004) : Math.max(0.00025, sz * 0.003);
+    targetSol = Math.min(targetSol, sizeCap);
+  }
+  const units = Math.max(20_000, Number(cuUnits) || 100_000);
+  const micro = Math.round((targetSol * LAMPORTS * 1_000_000) / units);
+  return Math.min(150_000_000, Math.max(100_000, micro));
+}
+
 // ---------- keys & signing ----------
 
 /** Accepts a base58 secret key (64-byte Phantom/Solflare export or 32-byte seed) or a JSON byte array. */
@@ -112,7 +141,7 @@ export class RealTrader {
    * @param state     saved state (spend log, trade log) from the database
    * @param onChange  called after every trade so the state can be saved
    */
-  constructor({ env = process.env, rpc, solPrice, fetchImpl = (...a) => fetch(...a), state = null, onChange = () => {}, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = () => Date.now(), fastRpcUrls = [] } = {}) {
+  constructor({ env = process.env, rpc, solPrice, fetchImpl = (...a) => fetch(...a), state = null, onChange = () => {}, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = () => Date.now(), fastRpcUrls = [], confirmWsUrl = null, WebSocketImpl = globalThis.WebSocket } = {}) {
     this.rpc = rpc;
     this.solPrice = solPrice;
     this.fetch = fetchImpl;
@@ -120,6 +149,18 @@ export class RealTrader {
     this.sleep = sleep;
     this.now = now;
     this.fastRpcUrls = Array.isArray(fastRpcUrls) ? [...new Set(fastRpcUrls.filter(Boolean))] : [];
+    this.confirmWsUrl = confirmWsUrl ? String(confirmWsUrl).trim() : null;
+    this.WebSocketImpl = WebSocketImpl || null;
+    this.confirmWs = null;
+    this.confirmWsTimer = null;
+    this.confirmWsWanted = false;
+    this.confirmWsId = 1;
+    this.confirmWsPendingId = new Map();
+    this.confirmWsSubToSig = new Map();
+    this.confirmWsSigToSub = new Map();
+    this.sigWaiters = new Map();
+    this.resolvedSigs = new Map();
+    this.ownTxCache = new Map();
     this.jupBase = (env.JUPITER_API_URL || 'https://api.jup.ag/swap/v2').replace(/\/+$/, '');
     this.jupKey = env.JUPITER_API_KEY || '';
     const num = (v, d) => (v === undefined || v === '' || !Number.isFinite(Number(v)) ? d : Number(v));
@@ -567,8 +608,13 @@ export class RealTrader {
 
   startConnectionWarmer(intervalMs = 15_000) {
     if (this.connectionWarmTimer) return;
+    if (this.confirmWsUrl) {
+      this.confirmWsWanted = true;
+      this.ensureConfirmWs();
+    }
     const tick = () => {
       if (!this.ready()) return;
+      if (this.confirmWsUrl) this.ensureConfirmWs();
       this.warmConnections().catch(() => {});
     };
     tick();
@@ -581,6 +627,216 @@ export class RealTrader {
       clearInterval(this.connectionWarmTimer);
       this.connectionWarmTimer = null;
     }
+    this.confirmWsWanted = false;
+    this.closeConfirmWs();
+  }
+
+  /** Cache a parsed own-wallet transaction (e.g. from Yellowstone gRPC) for 0-RPC readFill deltas. */
+  cacheOwnTransaction(signature, tx) {
+    if (!signature || !tx?.meta || tx.meta.err) return;
+    if (!this.ownTxCache) this.ownTxCache = new Map();
+    if (this.ownTxCache.size > 150) {
+      for (const [k, v] of this.ownTxCache) if (this.now() - v.at > 120_000) this.ownTxCache.delete(k);
+      if (this.ownTxCache.size > 150) this.ownTxCache.clear();
+    }
+    this.ownTxCache.set(signature, { tx, at: this.now() });
+  }
+
+  /**
+   * Push-notify an in-flight signature wait in 0 ms once Solana reaches `confirmed` / `finalized`.
+   * Never marks a swap succeeded at `processed` (~1% fork risk).
+   */
+  notifySignature(signature, { err = null, confirmationStatus = 'confirmed', tx = null } = {}) {
+    if (!signature) return false;
+    if (tx && !err) this.cacheOwnTransaction(signature, tx);
+    if (!err && confirmationStatus !== 'confirmed' && confirmationStatus !== 'finalized') return false;
+    let status;
+    if (err) {
+      if (!this.lastSigErrors) this.lastSigErrors = new Map();
+      if (this.lastSigErrors.size > 200) this.lastSigErrors.clear();
+      this.lastSigErrors.set(signature, err);
+      status = 'failed';
+    } else {
+      status = 'success';
+    }
+    if (!this.resolvedSigs) this.resolvedSigs = new Map();
+    if (this.resolvedSigs.size > 300) {
+      for (const [k, v] of this.resolvedSigs) if (this.now() - v.at > 60_000) this.resolvedSigs.delete(k);
+      if (this.resolvedSigs.size > 300) this.resolvedSigs.clear();
+    }
+    this.resolvedSigs.set(signature, { status, at: this.now() });
+    const set = this.sigWaiters?.get(signature);
+    if (set) {
+      this.sigWaiters.delete(signature);
+      for (const fn of set) fn(status);
+    }
+    const subId = this.confirmWsSigToSub?.get(signature);
+    if (subId !== undefined) {
+      this.confirmWsSigToSub.delete(signature);
+      this.confirmWsSubToSig?.delete(subId);
+    }
+    return true;
+  }
+
+  sendSignatureSubscribe(signature) {
+    if (!signature || !this.confirmWs || this.confirmWs.readyState !== 1) return;
+    if (this.confirmWsSigToSub?.has(signature)) return;
+    for (const sig of this.confirmWsPendingId?.values() || []) if (sig === signature) return;
+    const id = this.confirmWsId++;
+    this.confirmWsPendingId.set(id, signature);
+    try {
+      this.confirmWs.send(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          id,
+          method: 'signatureSubscribe',
+          params: [signature, { commitment: 'confirmed' }],
+        })
+      );
+    } catch {
+      this.confirmWsPendingId.delete(id);
+    }
+  }
+
+  ensureConfirmWs() {
+    if (!this.confirmWsUrl || !this.WebSocketImpl || !this.ready()) return;
+    if (this.confirmWs && (this.confirmWs.readyState === 0 || this.confirmWs.readyState === 1)) return;
+    let ws;
+    try {
+      ws = new this.WebSocketImpl(this.confirmWsUrl);
+    } catch {
+      return;
+    }
+    this.confirmWs = ws;
+    const cleanupAndRetry = () => {
+      if (this.confirmWs !== ws) return;
+      this.confirmWs = null;
+      this.confirmWsPendingId?.clear();
+      this.confirmWsSubToSig?.clear();
+      this.confirmWsSigToSub?.clear();
+      try {
+        ws.close();
+      } catch {
+        // ignore
+      }
+      if (this.confirmWsWanted || (this.sigWaiters && this.sigWaiters.size > 0)) {
+        clearTimeout(this.confirmWsTimer);
+        this.confirmWsTimer = setTimeout(() => this.ensureConfirmWs(), 1500);
+        this.confirmWsTimer.unref?.();
+      }
+    };
+    ws.onopen = () => {
+      if (this.confirmWs !== ws) return;
+      for (const sig of this.sigWaiters?.keys() || []) this.sendSignatureSubscribe(sig);
+    };
+    ws.onmessage = (ev) => {
+      if (this.confirmWs !== ws) return;
+      let msg;
+      try {
+        msg = JSON.parse(typeof ev?.data === 'string' ? ev.data : String(ev?.data || ''));
+      } catch {
+        return;
+      }
+      if (msg?.id !== undefined && this.confirmWsPendingId?.has(msg.id)) {
+        const sig = this.confirmWsPendingId.get(msg.id);
+        this.confirmWsPendingId.delete(msg.id);
+        if (msg.result !== undefined && msg.result !== null) {
+          if (this.sigWaiters?.has(sig)) {
+            this.confirmWsSubToSig.set(msg.result, sig);
+            this.confirmWsSigToSub.set(sig, msg.result);
+          } else {
+            // Waiter already finished before subscription ack: unsubscribe immediately
+            try {
+              ws.send(JSON.stringify({ jsonrpc: '2.0', id: this.confirmWsId++, method: 'signatureUnsubscribe', params: [msg.result] }));
+            } catch {
+              // ignore
+            }
+          }
+        }
+        return;
+      }
+      if (msg?.method === 'signatureNotification') {
+        const subId = msg.params?.subscription;
+        const sig = this.confirmWsSubToSig?.get(subId);
+        if (sig) {
+          this.confirmWsSubToSig.delete(subId);
+          this.confirmWsSigToSub.delete(sig);
+          const err = msg.params?.result?.value?.err ?? null;
+          this.notifySignature(sig, { err, confirmationStatus: 'confirmed' });
+        }
+      }
+    };
+    ws.onerror = () => {
+      if (ws.readyState !== 1) cleanupAndRetry();
+    };
+    ws.onclose = () => cleanupAndRetry();
+  }
+
+  closeConfirmWs() {
+    clearTimeout(this.confirmWsTimer);
+    this.confirmWsTimer = null;
+    const ws = this.confirmWs;
+    this.confirmWs = null;
+    this.confirmWsPendingId?.clear();
+    this.confirmWsSubToSig?.clear();
+    this.confirmWsSigToSub?.clear();
+    if (ws) {
+      ws.onopen = null;
+      ws.onmessage = null;
+      ws.onerror = null;
+      ws.onclose = null;
+      try {
+        ws.close();
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  /** Register a one-shot listener resolved in 0 ms by WebSocket signatureSubscribe or notifySignature. */
+  watchSignatureOnce(signature) {
+    if (!signature) return { promise: new Promise(() => {}), cancel: () => {} };
+    const hit = this.resolvedSigs?.get(signature);
+    if (hit && this.now() - hit.at < 60_000) {
+      return { promise: Promise.resolve(hit.status), cancel: () => {} };
+    }
+    if (!this.sigWaiters) this.sigWaiters = new Map();
+    let fn;
+    const promise = new Promise((resolve) => {
+      fn = resolve;
+    });
+    let set = this.sigWaiters.get(signature);
+    if (!set) {
+      set = new Set();
+      this.sigWaiters.set(signature, set);
+    }
+    set.add(fn);
+    if (this.confirmWsUrl) {
+      this.ensureConfirmWs();
+      this.sendSignatureSubscribe(signature);
+    }
+    const cancel = () => {
+      const cur = this.sigWaiters?.get(signature);
+      if (cur) {
+        cur.delete(fn);
+        if (cur.size === 0) {
+          this.sigWaiters.delete(signature);
+          const subId = this.confirmWsSigToSub?.get(signature);
+          if (subId !== undefined) {
+            this.confirmWsSigToSub.delete(signature);
+            this.confirmWsSubToSig?.delete(subId);
+            if (this.confirmWs?.readyState === 1) {
+              try {
+                this.confirmWs.send(JSON.stringify({ jsonrpc: '2.0', id: this.confirmWsId++, method: 'signatureUnsubscribe', params: [subId] }));
+              } catch {
+                // ignore
+              }
+            }
+          }
+        }
+      }
+    };
+    return { promise, cancel };
   }
 
   /**
@@ -597,8 +853,10 @@ export class RealTrader {
     const ata2022 = PD.ataAddress(this.address, mint, PD.TOKEN_2022_PROGRAM);
     if (!this.mintMetaCache) this.mintMetaCache = new Map();
     const cachedMeta = this.mintMetaCache.get(mint);
+    const activeBuying = (this.activeBuyCount?.get(mint) || 0) > 0;
     const fastTc =
       token?.curve &&
+      !token.curve.launchlab &&
       (!token.curve.at || this.now() - Number(token.curve.at) < 2000) &&
       Number(token.curve.virtualSolReserves) > 0 &&
       Number(token.curve.virtualTokenReserves) > 0 &&
@@ -606,7 +864,7 @@ export class RealTrader {
       !token.curve.cashback &&
       (side === 'buy'
         ? Number(token.curve.realTokenReserves) > 0 && (token.curve.tokenProgram === PD.TOKEN_PROGRAM || token.curve.tokenProgram === PD.TOKEN_2022_PROGRAM) && Number(this.balance?.sol) > 0
-        : cachedMeta && cachedMeta.heldRaw > 0n && !this.buyInProgress(mint) && (token.curve.tokenProgram === PD.TOKEN_PROGRAM || token.curve.tokenProgram === PD.TOKEN_2022_PROGRAM || cachedMeta.tokenProgram))
+        : cachedMeta && cachedMeta.heldRaw > 0n && !activeBuying && (token.curve.tokenProgram === PD.TOKEN_PROGRAM || token.curve.tokenProgram === PD.TOKEN_2022_PROGRAM || cachedMeta.tokenProgram))
         ? token.curve
         : null;
     let curve;
@@ -648,6 +906,9 @@ export class RealTrader {
       }
       baseTokenProgram = mintAcc?.owner;
       if (baseTokenProgram !== PD.TOKEN_PROGRAM && baseTokenProgram !== PD.TOKEN_2022_PROGRAM) return null;
+      if (!cachedMeta?.tokenProgram) {
+        this.mintMetaCache.set(mint, { ...(cachedMeta || {}), tokenProgram: baseTokenProgram });
+      }
       userAta = baseTokenProgram === PD.TOKEN_2022_PROGRAM ? ata2022 : ataSpl;
       const ataAcc = baseTokenProgram === PD.TOKEN_2022_PROGRAM ? ata2022Acc : ataSplAcc;
       preTokens = ataAcc ? PD.tokenAccountAmount(ataAcc.data?.[0]) : 0n;
@@ -709,12 +970,19 @@ export class RealTrader {
     const buyback = PD.BUYBACK_FEE_RECIPIENTS[Math.floor(Math.random() * PD.BUYBACK_FEE_RECIPIENTS.length)];
     let ixs;
     let minOut;
+    let priorityLamports = 0;
     try {
       // Every transaction must be unique: two copies of the same size for the same coin, built in the
       // same second with the same cached blockhash, would otherwise be byte-identical — one
-      // signature, one swap on-chain, but both booked. A per-swap compute limit makes them differ.
-      this.directNonce = ((this.directNonce || 0) + 1) % 50_000;
-      const budget = PD.computeBudgetIxs({ units: 220_000 + this.directNonce, microLamports: this.priorityMicroLamports() });
+      // signature, one swap on-chain, but both booked. Right-size CU limits (~95k buy / ~65k sell) so
+      // Solana validators rank our reward-per-CU higher in the leader slot.
+      this.directNonce = ((this.directNonce || 0) + 1) % 10_000;
+      const baseUnits = side === 'buy' ? 95_000 : 65_000;
+      const units = baseUnits + this.directNonce;
+      const tradeSol = Number(side === 'buy' ? d.lamportsIn : d.lamportsOut) / LAMPORTS;
+      const microLamports = this.priorityMicroLamports(units, side, tradeSol);
+      priorityLamports = Math.ceil((units * Math.max(0, Number(microLamports) || 0)) / 1_000_000);
+      const budget = PD.computeBudgetIxs({ units, microLamports });
       if (side === 'buy') {
         minOut = (d.tokensOut * keep) / 10_000n;
         if (minOut <= 0n) return { fallback: true, error: 'minimum tokens is 0' };
@@ -747,11 +1015,14 @@ export class RealTrader {
     let fastSendStart = 0;
     let fastSig = signed.signature;
     let fastSendP = null;
+    let fastConfirmP = null;
     if (d.fastCurve) {
       fastSent = true;
       fastSendStart = this.now();
       this.blastSignedTransaction(signed.base64);
       fastSendP = this.rpc('sendTransaction', [signed.base64, { encoding: 'base64', skipPreflight: true, maxRetries: 3 }]).catch(() => null);
+      // Start signature confirmation micro-polling immediately in parallel with simulation & send
+      fastConfirmP = this.waitForSignature(fastSig, 25_000);
     }
     // ----- simulate and check the balance changes -----
     let sim;
@@ -811,7 +1082,7 @@ export class RealTrader {
         // the fast RPCs above still got it; the status check decides
       }
     }
-    const st = await this.waitForSignature(sig, 25_000);
+    const st = fastConfirmP ? await fastConfirmP : await this.waitForSignature(sig, 25_000);
     const sendMs = this.now() - sendStart;
     if (st === 'unknown') return { unknown: true, signature: sig, error: 'sent but not confirmed in 25 s' };
     if (st === 'failed') {
@@ -841,7 +1112,7 @@ export class RealTrader {
       this.mintMetaCache.set(mint, { tokenProgram: d.baseTokenProgram, heldRaw: rem });
     }
     // exact amounts from the simulation as a fallback; readFill prefers the real transaction
-    const exec = side === 'buy' ? { totalInputAmount: String(inAmount), totalOutputAmount: String(outAmount) } : { totalInputAmount: String(inAmount), totalOutputAmount: String(outAmount) };
+    const exec = { totalInputAmount: String(inAmount), totalOutputAmount: String(outAmount), networkLamports: 5000 + priorityLamports };
     return { ok: true, signature: sig, exec, inAmount: String(inAmount), sendMs };
   }
 
@@ -1239,27 +1510,87 @@ export class RealTrader {
       // it is known not to have landed (a lost response must not reopen the cap)
 
       let execErr = null;
+      let fastChainConfirmed = false;
       const sendStart = this.now();
       // Blast the signed transaction directly (skipPreflight: true) to fast RPCs / Jito in parallel
       this.blastSignedTransaction(signed.signedBase64);
+      const jupP = this.jup('/execute', { method: 'POST', body: { signedTransaction: signed.signedBase64, requestId: order.requestId }, timeoutMs: 45_000 }).then(
+        (v) => ({ kind: 'jup', exec: v, err: null }),
+        (err) => ({ kind: 'jup', exec: null, err })
+      );
+      const wsWatch = signed.signature ? this.watchSignatureOnce(signed.signature) : null;
+      const wsConfirmP = wsWatch
+        ? wsWatch.promise.then((st) => (st === 'success' ? { kind: 'chain', ok: true } : jupP))
+        : null;
       try {
-        exec = await this.jup('/execute', { method: 'POST', body: { signedTransaction: signed.signedBase64, requestId: order.requestId }, timeoutMs: 45_000 });
-      } catch (err) {
-        execErr = err;
+        if ((this.fastRpcUrls?.length > 0 || this.confirmWsUrl) && signed.signature) {
+          let raceDone = false;
+          let wakePoll = null;
+          const chainConfirmP =
+            this.fastRpcUrls?.length > 0
+              ? (async () => {
+                  let step = 0;
+                  while (!raceDone) {
+                    const waitMs = step < 4 ? 35 : step < 10 ? 65 : 100;
+                    step += 1;
+                    await Promise.race([
+                      this.sleep(waitMs),
+                      new Promise((r) => {
+                        wakePoll = r;
+                      }),
+                    ]);
+                    if (raceDone) break;
+                    try {
+                      const r = await this.rpc('getSignatureStatuses', [[signed.signature], { searchTransactionHistory: true }]);
+                      const st = r?.value?.[0];
+                      if (st && !st.err && (st.confirmationStatus === 'confirmed' || st.confirmationStatus === 'finalized')) {
+                        return { kind: 'chain', ok: true };
+                      }
+                    } catch {
+                      // keep racing until jupP finishes
+                    }
+                  }
+                  return jupP;
+                })()
+              : null;
+          const racers = [jupP, wsConfirmP, chainConfirmP].filter(Boolean);
+          const winner = await Promise.race(racers);
+          raceDone = true;
+          wakePoll?.();
+          if (winner?.kind === 'chain' && winner.ok) {
+            fastChainConfirmed = true;
+          } else {
+            const jr = winner?.kind === 'jup' ? winner : await jupP;
+            exec = jr.exec;
+            execErr = jr.err;
+          }
+        } else {
+          const racers = [jupP, wsConfirmP].filter(Boolean);
+          const winner = await Promise.race(racers);
+          if (winner?.kind === 'chain' && winner.ok) {
+            fastChainConfirmed = true;
+          } else {
+            const jr = winner?.kind === 'jup' ? winner : await jupP;
+            exec = jr.exec;
+            execErr = jr.err;
+          }
+        }
+      } finally {
+        wsWatch?.cancel();
       }
 
       // copy speed, measured: Jupiter quote time and send → landed time
       timing = { route: 'jupiter', quoteMs, sendMs: this.now() - sendStart, ...(directNote ? { directFallback: directNote } : {}) };
-      let landed = exec && (exec.status === 'Success' || Number(exec.code) === 0);
+      let landed = fastChainConfirmed || Boolean(exec && (exec.status === 'Success' || Number(exec.code) === 0));
       signature = exec?.signature || signed.signature;
       // The same signed swap was also sent straight to Solana: Jupiter can report "failed to land"
       // while our own copy lands. Check the chain briefly before calling it failed — otherwise the
       // tokens would sit in the wallet with no position tracking them.
-      if (exec && !landed && !execErr && this.fastRpcUrls?.length) {
+      if (!fastChainConfirmed && exec && !landed && !execErr && this.fastRpcUrls?.length) {
         const st = await this.waitForSignature(signature, side === 'sell' ? 4000 : 8000);
         if (st === 'success') landed = true;
       }
-      if (!exec || (!landed && execErr)) {
+      if (!fastChainConfirmed && (!exec || (!landed && execErr))) {
         // response lost: look the transaction up on-chain before deciding
         const st = await this.waitForSignature(signature, 30_000);
         landed = st === 'success';
@@ -1283,7 +1614,18 @@ export class RealTrader {
     const tokDec = await this.getDecimals(mint).catch(() => null);
     let fill;
     try {
-      fill = await this.readFill({ signature, side, mint, quoteMint, exec, order, tokDec, newTokenAccount, fastCurve: Boolean(quote?._direct?.fastCurve) });
+      fill = await this.readFill({
+        signature,
+        side,
+        mint,
+        quoteMint,
+        exec: exec || (order?.outAmount ? { totalInputAmount: String(order.inAmount), totalOutputAmount: String(order.outAmount) } : null),
+        exactExec: Boolean(exec),
+        order,
+        tokDec,
+        newTokenAccount,
+        fastCurve: Boolean(quote?._direct?.fastCurve),
+      });
     } catch (err) {
       // The swap DID land: never report it as failed (that would leave untracked tokens in the
       // wallet). Book it from the quote and say the numbers are estimated.
@@ -1395,37 +1737,58 @@ export class RealTrader {
     }
   }
 
-  /** Poll signature status: 'success' | 'failed' | 'unknown'. */
+  /** Confirm signature status via WebSocket push + micro-poll race: 'success' | 'failed' | 'unknown'. */
   async waitForSignature(signature, maxMs) {
-    const until = this.now() + maxMs;
-    let step = 0;
-    while (this.now() < until) {
-      try {
-        const r = await this.rpc('getSignatureStatuses', [[signature], { searchTransactionHistory: true }]);
-        const st = r?.value?.[0];
-        if (st) {
-          if (st.err) {
-            if (!this.lastSigErrors) this.lastSigErrors = new Map();
-            if (this.lastSigErrors.size > 200) this.lastSigErrors.clear();
-            this.lastSigErrors.set(signature, st.err);
-            return 'failed';
+    const hit = this.resolvedSigs?.get(signature);
+    if (hit && this.now() - hit.at < 60_000) return hit.status;
+    const wsWatch = this.watchSignatureOnce(signature);
+    let done = false;
+    let wakeSleep = null;
+    const pollP = (async () => {
+      const until = this.now() + maxMs;
+      let step = 0;
+      while (!done && this.now() < until) {
+        try {
+          const r = await this.rpc('getSignatureStatuses', [[signature], { searchTransactionHistory: true }]);
+          const st = r?.value?.[0];
+          if (st) {
+            if (st.err) {
+              if (!this.lastSigErrors) this.lastSigErrors = new Map();
+              if (this.lastSigErrors.size > 200) this.lastSigErrors.clear();
+              this.lastSigErrors.set(signature, st.err);
+              return 'failed';
+            }
+            if (st.confirmationStatus === 'confirmed' || st.confirmationStatus === 'finalized') return 'success';
           }
-          if (st.confirmationStatus === 'confirmed' || st.confirmationStatus === 'finalized') return 'success';
+        } catch {
+          // keep trying
         }
-      } catch {
-        // keep trying
+        if (done) break;
+        const waitMs = step < 4 ? 35 : step < 10 ? 65 : 100;
+        step += 1;
+        await Promise.race([
+          this.sleep(waitMs),
+          new Promise((r) => {
+            wakeSleep = r;
+          }),
+        ]);
       }
-      await this.sleep(step < 4 ? 35 : step < 10 ? 65 : 100);
-      step += 1;
+      return 'unknown';
+    })();
+    try {
+      return await Promise.race([wsWatch.promise, pollP]);
+    } finally {
+      done = true;
+      wakeSleep?.();
+      wsWatch.cancel();
     }
-    return 'unknown';
   }
 
   /**
    * Exact amounts: Jupiter's execute result where present, the on-chain transaction for the
    * network fee (fee + priority + new token-account rent).
    */
-  async readFill({ signature, side, mint, quoteMint, exec, order, tokDec, newTokenAccount = false, fastCurve = false }) {
+  async readFill({ signature, side, mint, quoteMint, exec, exactExec = true, order, tokDec, newTokenAccount = false, fastCurve = false }) {
     const big = (v) => {
       try {
         return v === undefined || v === null || v === '' ? null : BigInt(String(v));
@@ -1437,15 +1800,16 @@ export class RealTrader {
     let outputRaw = big(exec?.totalOutputAmount) ?? big(exec?.outputAmountResult);
     const inputFeeRaw = big(exec?.totalInputAmount) !== null && big(exec?.inputAmountResult) !== null ? big(exec.totalInputAmount) - big(exec.inputAmountResult) : 0n;
     const outputFeeRaw = big(exec?.outputAmountResult) !== null && big(exec?.totalOutputAmount) !== null ? big(exec.outputAmountResult) - big(exec.totalOutputAmount) : 0n;
-    let networkLamports = 5000;
+    let networkLamports = Number.isFinite(Number(exec?.networkLamports)) && Number(exec.networkLamports) >= 5000 ? Number(exec.networkLamports) : 5000;
     let decimals = tokDec;
-    let tx = null;
-    // When Jupiter /execute already returned exact input & output amounts, never block the trade for
-    // 6 seconds waiting on getTransaction indexing: try once immediately (+ 1 micro-retry).
+    const cachedOwn = this.ownTxCache?.get(signature);
+    let tx = cachedOwn && this.now() - cachedOwn.at < 120_000 ? cachedOwn.tx : null;
+    // When Jupiter /execute or Direct simulation already gave exact input & output amounts, never sleep
+    // waiting on getTransaction indexing: check ownTxCache (0 ms) or try once immediately (0 sleep).
     // On fastCurve direct swaps where simulation already computed exact amounts, book in 0 ms without blocking on getTransaction.
     const haveExecAmounts = inputRaw !== null && outputRaw !== null;
-    const maxTries = fastCurve && haveExecAmounts ? 0 : haveExecAmounts ? 2 : 6;
-    const waitMs = haveExecAmounts ? 60 : 200;
+    const maxTries = tx || (fastCurve && haveExecAmounts) ? 0 : exactExec && haveExecAmounts ? 1 : haveExecAmounts ? 2 : 6;
+    const waitMs = haveExecAmounts ? 45 : 200;
     for (let i = 0; i < maxTries && !tx; i++) {
       try {
         tx = await this.rpc('getTransaction', [signature, { encoding: 'jsonParsed', maxSupportedTransactionVersion: 0, commitment: 'confirmed' }]);
@@ -1459,6 +1823,13 @@ export class RealTrader {
     if (!tx && side === 'buy' && newTokenAccount) networkLamports += 2_039_280;
     if (tx?.meta) {
       const keys = (tx.transaction?.message?.accountKeys || []).map((k) => (typeof k === 'string' ? k : k.pubkey));
+      if (keys.includes(TOKEN_2022_PROGRAM) && !this.mintMetaCache?.get(mint)?.tokenProgram) {
+        if (!this.mintMetaCache) this.mintMetaCache = new Map();
+        this.mintMetaCache.set(mint, { ...(this.mintMetaCache.get(mint) || {}), tokenProgram: TOKEN_2022_PROGRAM });
+      } else if (keys.includes(TOKEN_PROGRAM) && !keys.includes(TOKEN_2022_PROGRAM) && !this.mintMetaCache?.get(mint)?.tokenProgram) {
+        if (!this.mintMetaCache) this.mintMetaCache = new Map();
+        this.mintMetaCache.set(mint, { ...(this.mintMetaCache.get(mint) || {}), tokenProgram: TOKEN_PROGRAM });
+      }
       const me = keys.indexOf(this.address);
       const solDelta = me >= 0 ? BigInt(tx.meta.postBalances[me]) - BigInt(tx.meta.preBalances[me]) : null; // lamports
       const tokDelta = (m) => {

@@ -1108,6 +1108,7 @@ export class CopyTradingEngine {
       trailArmed: false,
       exitStuck: false,
       openedAt: Date.now(),
+      lastCurve: token.curve && Number(token.curve.virtualSolReserves) > 0 ? { ...token.curve, at: Date.now() } : null,
       armedOrders: [],
     };
     this.positions.unshift(position);

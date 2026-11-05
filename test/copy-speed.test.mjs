@@ -8,10 +8,11 @@ import { SolanaWalletWatcher, TokenInfoService, PUMP_CURVE_PROGRAM, PUMP_SUPPLY,
 import { RAYDIUM_LAUNCHLAB_PROGRAM } from '../engine/pumpCurve.mjs';
 import { WalletStream } from '../engine/walletStream.mjs';
 import { TokenAccountStream } from '../engine/tokenStream.mjs';
-import { RealTrader, WSOL_MINT } from '../engine/realTrader.mjs';
+import { RealTrader, WSOL_MINT, priorityMicroLamportsFor } from '../engine/realTrader.mjs';
+import * as PD from '../engine/pumpDirect.mjs';
 import { base58Encode } from '../engine/onchainMeta.mjs';
 import { CopyTradingEngine, createDefaultExitRules } from '../engine/copyEngine.mjs';
-import { CHAINS } from '../engine/chainAdapters.mjs';
+import { CHAINS, paperDelayMsFor } from '../engine/chainAdapters.mjs';
 
 const WALLET = '498g1rVnFcnjBjpfw1xyqA1WvgQXUU8RWuELjxkjAayQ';
 
@@ -552,4 +553,329 @@ test('S13 fast RPC race ignores faster null/unindexed responses when another RPC
   const tx = await w.rpc('getTransaction', ['sig-1', { encoding: 'jsonParsed' }], { fast: true });
   assert.equal(tx?.slot, 999, 'waited 25ms for Helius indexed tx instead of returning Alchemy null');
   assert.ok(seenKeepalive.every((k) => k === true), 'all JSON-RPC fetches reuse keep-alive sockets');
+});
+
+test('S14 priorityMicroLamportsFor wires dashboard priorityFee presets and executeDirect right-sizes CU limits (~95k buy / ~65k sell)', async () => {
+  // 0.0002 SOL across 100k CU = 2,000,000 microLamports/CU
+  assert.equal(priorityMicroLamportsFor({ mode: 'normal' }, 100_000), 2_000_000);
+  // 0.001 SOL across 100k CU = 10,000,000 microLamports/CU
+  assert.equal(priorityMicroLamportsFor({ mode: 'fast' }, 100_000), 10_000_000);
+  // 0.005 SOL across 100k CU = 50,000,000 microLamports/CU
+  assert.equal(priorityMicroLamportsFor({ mode: 'turbo' }, 100_000), 50_000_000);
+  // custom clamped safely at <= 0.01 SOL even if someone enters 5 SOL
+  assert.equal(priorityMicroLamportsFor({ mode: 'custom', customSol: 5 }, 100_000), 100_000_000);
+  // explicit env override wins
+  assert.equal(priorityMicroLamportsFor({ mode: 'turbo' }, 100_000, '750000'), 750_000);
+
+  // Inspect compiled SetComputeUnitLimit instruction on Direct buy & sell
+  const { privateKey, publicKey } = crypto.generateKeyPairSync('ed25519');
+  const secret = base58Encode(Buffer.concat([privateKey.export({ format: 'der', type: 'pkcs8' }).subarray(-32), publicKey.export({ format: 'der', type: 'spki' }).subarray(-32)]));
+  const mint = base58Encode(crypto.randomBytes(32));
+  const sentTxs = [];
+  const trader = new RealTrader({
+    env: { ODEX_TRADER_KEY: secret },
+    solPrice: () => 200,
+    rpc: async (method, params) => {
+      if (method === 'getLatestBlockhash') return { value: { blockhash: base58Encode(crypto.randomBytes(32)) } };
+      if (method === 'simulateTransaction') return { value: { err: null, accounts: [{ lamports: 4_900_000_000 }, { data: [Buffer.alloc(165).toString('base64'), 'base64'] }] } };
+      if (method === 'sendTransaction') {
+        sentTxs.push(Buffer.from(params[0], 'base64'));
+        return base58Encode(Buffer.from(params[0], 'base64').subarray(1, 65));
+      }
+      if (method === 'getSignatureStatuses') return { value: [{ confirmationStatus: 'confirmed', err: null }] };
+      return null;
+    },
+  });
+  trader.routeSetting = () => 'direct';
+  trader.balance = { sol: 5, usdc: 0 };
+  trader.priorityMicroLamports = (u) => priorityMicroLamportsFor({ mode: 'fast' }, u);
+  await trader.refreshBlockhash();
+
+  const fastTok = {
+    address: mint,
+    symbol: 'FAST',
+    decimals: 6,
+    curve: { virtualSolReserves: 30_000_000_000, virtualTokenReserves: 1_073_000_000_000_000, realTokenReserves: 790_000_000_000_000, mayhem: false, cashback: false, tokenProgram: PD.TOKEN_2022_PROGRAM },
+  };
+  const readCuLimit = (tx) => {
+    const n = tx[0];
+    const m = tx.subarray(1 + 64 * n);
+    const nKeys = m[3];
+    let o = 4 + 32 * nKeys + 32 + 1;
+    o += 1; // prog idx
+    const na = m[o++];
+    o += na;
+    const dl = m[o++];
+    const data = m.subarray(o, o + dl);
+    assert.equal(data[0], 2, 'SetComputeUnitLimit instruction tag = 2');
+    return data.readUInt32LE(1);
+  };
+
+  const qb = await trader.quote({ side: 'buy', token: fastTok, amountUsd: 8, slippagePct: 10 });
+  const rb = await trader.execute({ side: 'buy', token: fastTok, amountUsd: 8, quote: qb, slippagePct: 10 });
+  assert.equal(rb.ok, true);
+  const buyCu = readCuLimit(sentTxs[0]);
+  assert.ok(buyCu >= 95_000 && buyCu < 105_000, `Direct buy CU limit right-sized (~95k..105k), got ${buyCu}`);
+
+  const qs = await trader.quote({ side: 'sell', token: fastTok, tokenAmount: 'all', slippagePct: 15 });
+  const rs = await trader.execute({ side: 'sell', token: fastTok, tokenAmount: 'all', quote: qs, slippagePct: 15 });
+  assert.equal(rs.ok, true);
+  const sellCu = readCuLimit(sentTxs[1]);
+  assert.ok(sellCu >= 65_000 && sellCu < 75_000, `Direct sell CU limit right-sized (~65k..75k), got ${sellCu}`);
+});
+
+test('S15 immediate <3s direct sell uses pos.lastCurve for 0-RPC quote and overlaps waitForSignature in parallel with simulateTransaction', async () => {
+  CHAINS.solana.nativePriceUsd = 200;
+  const { privateKey, publicKey } = crypto.generateKeyPairSync('ed25519');
+  const secret = base58Encode(Buffer.concat([privateKey.export({ format: 'der', type: 'pkcs8' }).subarray(-32), publicKey.export({ format: 'der', type: 'spki' }).subarray(-32)]));
+  const mint = `${base58Encode(crypto.randomBytes(29)).slice(0, 40)}pump`;
+  const events = [];
+  let simGate = null;
+
+  const trader = new RealTrader({
+    env: { ODEX_TRADER_KEY: secret },
+    solPrice: () => 200,
+    rpc: async (method, params) => {
+      events.push(method);
+      if (method === 'getLatestBlockhash') return { value: { blockhash: base58Encode(crypto.randomBytes(32)) } };
+      if (method === 'simulateTransaction') {
+        if (simGate) await simGate;
+        return { value: { err: null, accounts: [{ lamports: 4_950_000_000 }, { data: [Buffer.alloc(165).toString('base64'), 'base64'] }] } };
+      }
+      if (method === 'sendTransaction') return base58Encode(Buffer.from(params[0], 'base64').subarray(1, 65));
+      if (method === 'getSignatureStatuses') return { value: [{ confirmationStatus: 'confirmed', err: null }] };
+      return null;
+    },
+  });
+  trader.routeSetting = () => 'direct';
+  trader.balance = { sol: 5, usdc: 0 };
+  await trader.refreshBlockhash();
+
+  const e = new CopyTradingEngine();
+  e.resetToCleanState();
+  e.settings.paperTrading = false;
+  e.settings.tradingAsset.solana = 'native';
+  e.adapter.liveHooks = trader.hooks();
+  e.adapter.realEnabled = () => true;
+  e.getActiveWallet().balances.solana = { native: 5, stable: 0 };
+  const f = {
+    id: 'fol-fast-sell', walletId: e.getActiveWallet().id, name: 'Decu', handle: 'Decu', traderWallet: WALLET, chainId: 'solana',
+    status: 'copying', pauseReason: null, mode: 'auto-exit', mirrorSells: true, sizing: { type: 'fixed', amount: 8 }, maxChasePct: 25,
+    minTradeUsd: 1, maxOpenPositions: 100, maxAtRiskUsd: 100000, consecutiveLosses: 0, exitRules: createDefaultExitRules(), filtersOverride: {}, createdAt: Date.now(),
+  };
+  e.follows.unshift(f);
+
+  const curve = { virtualSolReserves: 32_000_000_000, virtualTokenReserves: 1_006_000_000_000_000, realTokenReserves: 726_000_000_000_000, mayhem: false, cashback: false, tokenProgram: PD.TOKEN_2022_PROGRAM };
+  const [buyRes] = await e.processTraderSignal({
+    chainId: 'solana', side: 'buy', traderHandle: 'Decu', traderWallet: WALLET, traderBuyUsd: 100, signature: 'sig-fast-b',
+    token: { address: mint, decimals: 6, symbol: 'QUICK', name: 'Quick', isLaunchpad: true, venue: 'pumpfun', stage: 'pre-grad', marketCapUsd: 6360, traderFillPriceUsd: 0.00000636, currentPriceUsd: 0.00000636, curve, safety: { safetyVerified: true } },
+  });
+  assert.equal(buyRes.status, 'filled');
+  assert.ok(e.positions[0].lastCurve, 'position initialized lastCurve from buy signal');
+  assert.equal(trader.buyInProgress(mint), true, 'still inside 3s post-buy grace window');
+
+  // Hold simulateTransaction open for 50ms: getSignatureStatuses MUST still fire in parallel before simulateTransaction resolves!
+  events.length = 0;
+  let releaseSim;
+  simGate = new Promise((r) => { releaseSim = r; });
+
+  const sellP = e.executePositionSell(e.positions[0].id, { sellPct: 100, cause: 'Take Initials' });
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(events.filter((m) => m === 'getMultipleAccounts').length, 0, '0-RPC fastCurve direct sell quote even <3s after buy');
+  assert.ok(events.includes('getSignatureStatuses'), 'waitForSignature started polling in parallel before simulateTransaction finished');
+  releaseSim();
+  const sellRes = await sellP;
+  assert.equal(sellRes.ok, true);
+});
+
+test('S16 Jupiter swap races /execute against on-chain getSignatureStatuses when fastRpcUrls are active', async () => {
+  const { privateKey, publicKey } = crypto.generateKeyPairSync('ed25519');
+  const seed = privateKey.export({ format: 'der', type: 'pkcs8' }).subarray(-32);
+  const pub = publicKey.export({ format: 'der', type: 'spki' }).subarray(-32);
+  const secret = base58Encode(Buffer.concat([seed, pub]));
+  const makeTx = () =>
+    Buffer.concat([
+      Buffer.from([1]),
+      Buffer.alloc(64),
+      Buffer.from([0x80, 1, 0, 1, 2]),
+      pub,
+      crypto.randomBytes(32),
+      crypto.randomBytes(32),
+      Buffer.from([0, 0]),
+    ]).toString('base64');
+
+  const MINT = 'PumpSwapGrad1111111111111111111111111111pump';
+  const trader = new RealTrader({
+    env: { ODEX_TRADER_KEY: secret },
+    solPrice: () => 200,
+    fastRpcUrls: ['https://ny.mainnet.block-engine.jito.wtf/api/v1/transactions'],
+    rpc: async (method) => {
+      if (method === 'getBalance') return { value: 5e9 };
+      if (method === 'getSignatureStatuses') return { value: [{ confirmationStatus: 'confirmed', err: null }] };
+      if (method === 'getTransaction') return null;
+      return { value: { decimals: 6 } };
+    },
+    fetchImpl: async (url) => {
+      if (String(url).includes('block-engine.jito.wtf')) {
+        return { ok: true, status: 200, text: async () => '{}' };
+      }
+      if (String(url).includes('/order')) {
+        return { ok: true, status: 200, text: async () => JSON.stringify({ transaction: makeTx(), requestId: 'r-race', inAmount: '40000000', outAmount: '2000000000', router: 'metis' }) };
+      }
+      // Simulate slow 600ms Jupiter /execute HTTP wrapper while Jito already confirmed in 35ms!
+      await new Promise((r) => setTimeout(r, 600).unref?.());
+      return { ok: true, status: 200, text: async () => JSON.stringify({ status: 'Success', code: 0, totalInputAmount: '40000000', totalOutputAmount: '2000000000' }) };
+    },
+  });
+
+  const tok = { address: MINT, symbol: 'GRAD', decimals: 6, venue: 'pumpswap', stage: 'graduated', currentPriceUsd: 0.004 };
+  const q = await trader.quote({ side: 'buy', token: tok, amountUsd: 8, slippagePct: 10 });
+  const t0 = Date.now();
+  const r = await trader.execute({ side: 'buy', token: tok, amountUsd: 8, quote: q, slippagePct: 10 });
+  const elapsed = Date.now() - t0;
+  assert.equal(r.ok, true);
+  assert.ok(elapsed < 250, `completed in ${elapsed} ms via on-chain confirmation race without waiting 600 ms for Jupiter /execute`);
+});
+
+test('S17 WebSocket signatureSubscribe + ownTxCache confirms swaps in 0 ms at confirmed commitment (never processed) with 0-RPC readFill', async () => {
+  const { privateKey, publicKey } = crypto.generateKeyPairSync('ed25519');
+  const seed = privateKey.export({ format: 'der', type: 'pkcs8' }).subarray(-32);
+  const pub = publicKey.export({ format: 'der', type: 'spki' }).subarray(-32);
+  const secret = base58Encode(Buffer.concat([seed, pub]));
+  const MINT = 'WsConfirm111111111111111111111111111111pump';
+
+  const sentWsMsgs = [];
+  class MockWS {
+    constructor(url) {
+      this.url = url;
+      this.readyState = 1;
+      setImmediate(() => this.onopen?.());
+    }
+    send(raw) {
+      const msg = JSON.parse(raw);
+      sentWsMsgs.push(msg);
+      if (msg.method === 'signatureSubscribe') {
+        const sig = msg.params[0];
+        // Subscribed strictly at 'confirmed' commitment
+        assert.equal(msg.params[1]?.commitment, 'confirmed');
+        setImmediate(() => {
+          this.onmessage?.({ data: JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: 777 }) });
+          this.onmessage?.({
+            data: JSON.stringify({
+              jsonrpc: '2.0',
+              method: 'signatureNotification',
+              params: { subscription: 777, result: { context: { slot: 123 }, value: { err: null } } },
+            }),
+          });
+        });
+      }
+    }
+    close() {
+      this.readyState = 3;
+    }
+  }
+
+  let getTxCalls = 0;
+  const trader = new RealTrader({
+    env: { ODEX_TRADER_KEY: secret },
+    solPrice: () => 200,
+    confirmWsUrl: 'wss://mainnet.helius-rpc.example/?api-key=test',
+    WebSocketImpl: MockWS,
+    rpc: async (method) => {
+      if (method === 'getBalance') return { value: 5e9 };
+      if (method === 'getSignatureStatuses') {
+        // Simulate slow HTTP status polling (400 ms) so WS signatureSubscribe wins!
+        await new Promise((r) => setTimeout(r, 400).unref?.());
+        return { value: [null] };
+      }
+      if (method === 'getTransaction') {
+        getTxCalls += 1;
+        return null;
+      }
+      return { value: { decimals: 6 } };
+    },
+    fetchImpl: async (url) => {
+      if (String(url).includes('/order')) {
+        const tx = Buffer.concat([
+          Buffer.from([1]),
+          Buffer.alloc(64),
+          Buffer.from([0x80, 1, 0, 1, 2]),
+          pub,
+          crypto.randomBytes(32),
+          crypto.randomBytes(32),
+          Buffer.from([0, 0]),
+        ]).toString('base64');
+        return { ok: true, status: 200, text: async () => JSON.stringify({ transaction: tx, requestId: 'r-ws', inAmount: '40000000', outAmount: '2500000000', router: 'metis' }) };
+      }
+      // Slow 800 ms Jupiter /execute HTTP wrapper
+      await new Promise((r) => setTimeout(r, 800).unref?.());
+      return { ok: true, status: 200, text: async () => JSON.stringify({ status: 'Success', code: 0, totalInputAmount: '40000000', totalOutputAmount: '2500000000' }) };
+    },
+  });
+
+  // Safety guard: 'processed' must NEVER mark a signature succeeded
+  assert.equal(trader.notifySignature('unconfirmed-sig', { err: null, confirmationStatus: 'processed' }), false);
+  assert.equal(trader.resolvedSigs.has('unconfirmed-sig'), false);
+
+  const tok = { address: MINT, symbol: 'WSFAST', decimals: 6, venue: 'pumpswap', stage: 'graduated', currentPriceUsd: 0.0032 };
+  const q = await trader.quote({ side: 'buy', token: tok, amountUsd: 8, slippagePct: 10 });
+  // Pre-cache own-wallet transaction (as Yellowstone gRPC onWalletTx does) before/during confirmation
+  const { signature } = (await import('../engine/realTrader.mjs')).signTransactionBase64(q._order.transaction, trader.keypair);
+  trader.cacheOwnTransaction(signature, {
+    slot: 123,
+    meta: {
+      err: null,
+      fee: 35_000,
+      preBalances: [5_000_000_000],
+      postBalances: [5_000_000_000 - 40_000_000 - 35_000],
+      preTokenBalances: [],
+      postTokenBalances: [{ mint: MINT, owner: trader.address, uiTokenAmount: { amount: '2512345678', decimals: 6 } }],
+    },
+    transaction: { signatures: [signature], message: { accountKeys: [{ pubkey: trader.address }] } },
+  });
+
+  const t0 = Date.now();
+  const r = await trader.execute({ side: 'buy', token: tok, amountUsd: 8, quote: q, slippagePct: 10 });
+  const elapsed = Date.now() - t0;
+  trader.stopConnectionWarmer();
+
+  assert.equal(r.ok, true);
+  assert.ok(elapsed < 100, `confirmed via WebSocket signatureSubscribe in ${elapsed} ms without waiting 400–800 ms on HTTP polling`);
+  assert.equal(getTxCalls, 0, '0 getTransaction RPC calls because ownTxCache supplied exact tx.meta');
+  assert.ok(Math.abs(r.tokensReceived - 2512.345678) < 1e-6, 'used exact on-chain tokens from ownTxCache');
+  assert.ok(sentWsMsgs.some((m) => m.method === 'signatureSubscribe'), 'sent WebSocket signatureSubscribe');
+});
+
+test('S18 size-calibrated priorityMicroLamportsFor protects $8 (~0.083 SOL) trades from fee bleed while boosting CU priority 35x+', () => {
+  // $8 trade at ~$96/SOL = 0.0833 SOL across 95,000 CU:
+  // Uncapped 'turbo' would charge 0.005 SOL (~$0.48/leg = 60% of a +$0.80 +10% TP!).
+  // Size-calibrated 'turbo' caps at 0.00035 SOL (~$0.033/leg) = ~3,684,211 microLamports/CU (36.8x old 100k default!)
+  const turboSmall = priorityMicroLamportsFor({ mode: 'turbo' }, 95_000, null, { tradeSol: 0.0833 });
+  const turboSmallSol = (turboSmall * 95_000) / 1e15;
+  assert.ok(turboSmall > 3_500_000, `35x+ higher priority than old 100k default (${turboSmall})`);
+  assert.ok(Math.abs(turboSmallSol - 0.00035) < 0.00001, `capped at ~0.00035 SOL on $8 trade, got ${turboSmallSol}`);
+
+  const fastSmall = priorityMicroLamportsFor({ mode: 'fast' }, 95_000, null, { tradeSol: 0.0833 });
+  const fastSmallSol = (fastSmall * 95_000) / 1e15;
+  assert.ok(Math.abs(fastSmallSol - 0.00025) < 0.00001, `fast capped at ~0.00025 SOL on $8 trade, got ${fastSmallSol}`);
+
+  // Larger 1.5 SOL trade automatically scales up to the full 0.005 SOL turbo preset
+  const turboLarge = priorityMicroLamportsFor({ mode: 'turbo' }, 100_000, null, { tradeSol: 1.5 });
+  assert.equal(turboLarge, 50_000_000);
+
+  // Explicit custom mode always honors customSol without size-capping
+  const customExplicit = priorityMicroLamportsFor({ mode: 'custom', customSol: 0.002 }, 100_000, null, { tradeSol: 0.0833 });
+  assert.equal(customExplicit, 20_000_000);
+});
+
+test('S19 paperDelayMsFor models realistic >=650 ms Solana confirmed latency instead of 250 ms sub-slot phantom scalps', () => {
+  assert.equal(paperDelayMsFor({ chainId: 'bsc', side: 'buy', swapRoute: 'direct' }), 0);
+  const directTok = { venue: 'pumpfun', stage: 'pre-grad', curve: { virtualSolReserves: 32e9 } };
+  assert.equal(paperDelayMsFor({ chainId: 'solana', side: 'buy', token: directTok, swapRoute: 'direct' }), 650);
+  assert.equal(paperDelayMsFor({ chainId: 'solana', side: 'sell', token: directTok, swapRoute: 'direct' }), 750);
+
+  // LaunchLab pre-grad tokens route via Jupiter, NOT direct pump.fun curve
+  const launchLabTok = { venue: 'launchlab', stage: 'pre-grad', curve: { virtualSolReserves: 32e9, launchlab: true } };
+  assert.equal(paperDelayMsFor({ chainId: 'solana', side: 'buy', token: launchLabTok, swapRoute: 'direct' }), 950);
+  assert.equal(paperDelayMsFor({ chainId: 'solana', side: 'sell', token: launchLabTok, swapRoute: 'direct' }), 1000);
 });
