@@ -2032,8 +2032,10 @@ export class CopyTradingEngine {
     this.history = [];
     this.alerts = [];
     this.realizedLog = [];
+    this.traderLog = [];
     this.copiedCycles = {};
     this.buyCooldownMap.clear();
+    if (this.settings?.risk) this.settings.risk.dailyLossTriggered = false;
     this.emit('state_reset', {});
     return this.getStateSnapshot();
   }

@@ -6987,17 +6987,181 @@ body.logged-out .cfg-signout{display:none}
 .intg-logo-dax img{border-radius:8px}
 .intg-dax-usage{margin-right:auto;font-size:12px;color:var(--text-dim)}
 
-/* Settings menu — compact list style (icon + label, neutral highlight), like a native app sidebar */
-.cfg-layout{grid-template-columns:210px minmax(0,1fr)}
-.cfg-side{gap:6px}
-.cfg-nav{gap:2px;padding:0;background:transparent;border:0;border-radius:0}
-.cfg-nav-btn,.cfg-signout{gap:10px;padding:7px 10px;border:0;border-radius:10px;background:transparent;color:#d4d4d8}
-.cfg-nav-btn:hover,.cfg-signout:hover{background:rgba(255,255,255,.05);color:#fafafa}
-.cfg-nav-btn.active{background:rgba(255,255,255,.08);color:#fafafa}
-.cfg-nav-ico,.cfg-nav-btn.active .cfg-nav-ico{flex:0 0 18px;width:18px;height:18px;border-radius:0;background:transparent;color:inherit}
-.cfg-nav-ico svg,.cfg-nav-ico img{width:16px;height:16px}
-.cfg-nav-txt small{display:none}
-.cfg-nav-txt strong,.cfg-signout .cfg-nav-txt strong{font-size:14px;font-weight:400;color:inherit}
-.cfg-signout{margin-top:6px;border-top:1px solid rgba(255,255,255,.06);border-radius:0 0 10px 10px;padding-top:11px}
-.cfg-signout:hover{color:#f87171;background:rgba(248,113,113,.07);border-top-color:rgba(255,255,255,.06)}
-.cfg-signout:hover .cfg-nav-txt strong{color:#f87171}
+/* Settings menu — spacious full-height sidebar matching the right content card */
+.cfg-layout { grid-template-columns: 285px minmax(0, 1fr); gap: 22px; align-items: stretch; }
+.cfg-side {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 14px;
+  min-height: 540px;
+  padding: 14px;
+  border-radius: 20px;
+  background: var(--card);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+.cfg-nav { display: flex; flex-direction: column; gap: 6px; padding: 0; background: transparent; border: 0; border-radius: 0; }
+.cfg-nav-btn, .cfg-signout {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  width: 100%;
+  padding: 11px 14px;
+  border: 1px solid transparent;
+  border-radius: 16px !important;
+  background: transparent;
+  color: #d4d4d8;
+  transition: background 0.16s ease, color 0.16s ease, border-color 0.16s ease, transform 0.12s ease;
+}
+.cfg-nav-btn:hover { background: rgba(255, 255, 255, 0.045); color: #fafafa; }
+.cfg-nav-btn.active {
+  background: rgba(139, 92, 246, 0.15);
+  border-color: rgba(139, 92, 246, 0.32);
+  color: #ffffff;
+}
+.cfg-nav-ico {
+  display: grid;
+  place-items: center;
+  flex: 0 0 38px;
+  width: 38px;
+  height: 38px;
+  border-radius: 11px;
+  background: rgba(255, 255, 255, 0.045);
+  color: #cbd5e1;
+  transition: background 0.16s ease, color 0.16s ease;
+}
+.cfg-nav-btn.active .cfg-nav-ico {
+  background: rgba(139, 92, 246, 0.28);
+  color: #ddd6fe;
+}
+.cfg-nav-ico svg, .cfg-nav-ico img { width: 18px; height: 18px; }
+.cfg-nav-txt { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.cfg-nav-txt strong, .cfg-signout .cfg-nav-txt strong { font-size: 14.5px; font-weight: 500; color: inherit; line-height: 1.25; }
+.cfg-nav-txt small { display: block; font-size: 11.5px; color: var(--text-mute, #8b8d97); line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cfg-nav-btn.active .cfg-nav-txt small { color: rgba(221, 214, 254, 0.78); }
+.cfg-signout {
+  margin-top: auto;
+  padding-top: 13px;
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 16px !important;
+}
+.cfg-signout:hover { color: #f87171; background: rgba(248, 113, 113, 0.08); border-color: rgba(248, 113, 113, 0.25); }
+.cfg-signout:hover .cfg-nav-ico { background: rgba(248, 113, 113, 0.15); color: #f87171; }
+.cfg-signout:hover .cfg-nav-txt strong { color: #f87171; }
+@media (max-width: 900px) {
+  .cfg-layout { grid-template-columns: 1fr; }
+  .cfg-side { min-height: 0; padding: 10px; }
+  .cfg-nav { flex-direction: row; overflow-x: auto; gap: 6px; }
+  .cfg-nav-btn { flex: 0 0 auto; width: auto; padding: 9px 12px; }
+  .cfg-nav-txt small { display: none; }
+  .cfg-signout { margin-top: 6px; }
+}
+
+/* Integrations — clickable App Icons grid + API popup modal */
+.intg-apps-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+}
+@media (max-width: 1100px) { .intg-apps-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 640px) { .intg-apps-grid { grid-template-columns: 1fr; } }
+.intg-app-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 20px;
+  border-radius: 20px !important;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: transform 0.16s ease, background 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease;
+}
+.intg-app-tile:hover {
+  transform: translateY(-2px);
+  background: rgba(255, 255, 255, 0.045);
+  border-color: rgba(139, 92, 246, 0.42);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.35), 0 0 0 1px rgba(139, 92, 246, 0.15);
+}
+.intg-tile-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.intg-app-icon {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 56px;
+  height: 56px;
+  border-radius: 16px;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.28);
+  flex: none;
+}
+.intg-app-icon.intg-logo-dax {
+  background: #101018;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  overflow: visible;
+}
+.intg-app-icon.intg-logo-dax > img { border-radius: 12px; }
+.intg-sub-badge {
+  position: absolute;
+  right: -4px;
+  bottom: -4px;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  background: #ffffff;
+  border: 2px solid #14141d;
+  display: grid;
+  place-items: center;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+}
+.intg-tile-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.intg-tile-meta strong {
+  font-size: 15.5px;
+  font-weight: 600;
+  color: #ffffff;
+  line-height: 1.3;
+}
+.intg-tile-meta small {
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text-mute, #8b8d97);
+}
+.intg-app-cta {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: auto;
+  padding-top: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+  font-size: 12.5px;
+  font-weight: 500;
+  color: #c4b5fd;
+  transition: gap 0.15s ease, color 0.15s ease;
+}
+.intg-app-tile:hover .intg-app-cta {
+  gap: 9px;
+  color: #ddd6fe;
+}
+.modal-intg { max-width: 540px; width: calc(100% - 32px); }
+.intg-modal-head {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  padding-bottom: 14px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+}
+.intg-modal-head .intg-logo { width: 46px; height: 46px; border-radius: 13px; }
+.intg-pane[hidden] { display: none !important; }

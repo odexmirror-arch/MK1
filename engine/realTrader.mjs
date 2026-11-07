@@ -279,6 +279,12 @@ export class RealTrader {
     return { spendLog: this.spendLog.slice(-500), trades: this.trades.slice(0, 300) };
   }
 
+  clearState() {
+    this.spendLog = [];
+    this.trades = [];
+    this.directStats = { direct: 0, fallbacks: 0, priceSkips: 0, lastFallback: null, lastFallbackAt: null, lastDirectAt: null };
+  }
+
   spent24hSol() {
     const cutoff = this.now() - DAY_MS;
     this.spendLog = this.spendLog.filter((x) => x.t >= cutoff);

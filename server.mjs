@@ -1824,6 +1824,60 @@ export const server = http.createServer(async (req, res) => {
         return sendJson(res, 400, { ok: false, error: err.message });
       }
     }
+    if (pathname === '/api/db/clear' && req.method === 'POST') {
+      try {
+        if (engine.settings?.externalWallets) engine.settings.externalWallets = {};
+        if (engine.settings?.daxShare) engine.settings.daxShare = null;
+        engine.resetToCleanState();
+        liveSignals.config.manual = [];
+        liveSignals.clear();
+        liveSignals.sync();
+        realTrader.clearState();
+        daxHistory = [];
+        if (persistence?.timer) {
+          clearTimeout(persistence.timer);
+          persistence.timer = null;
+        }
+        if (supabase?.timer) {
+          clearTimeout(supabase.timer);
+          supabase.timer = null;
+        }
+        if (supabase) supabase.pending = null;
+        const cleanEntries = [
+          ['engine', serializeEngine(engine)],
+          ['liveSignals', serializeLive(liveSignals)],
+          ['realTrader', realTrader.exportState()],
+          ['daxChat', { msgs: [], savedAt: Date.now() }],
+        ];
+        if (db) {
+          db.clear?.();
+          db.setMany(cleanEntries);
+          db.compact?.();
+        }
+        if (persistence) {
+          persistence.lastSavedAt = Date.now();
+          persistence.lastError = null;
+          persistence.restored = null;
+          persistence.cloudDirty = false;
+        }
+        let cloudCleared = false;
+        if (supabase.enabled && holdsData()) {
+          try {
+            cloudCleared = await supabase.push(cleanEntries);
+          } catch {
+            cloudCleared = false;
+          }
+        }
+        return sendJson(res, 200, {
+          ok: true,
+          cloudCleared,
+          state: engine.getStateSnapshot(),
+          ...(persistence ? persistence.info() : {}),
+        });
+      } catch (err) {
+        return sendJson(res, 500, { ok: false, error: err.message });
+      }
+    }
 
     // PnL totals for a period (Period PnL card, win rate, Closed totals) — same log as the calendar
     if (pathname === '/api/pnl/summary' && req.method === 'GET') {

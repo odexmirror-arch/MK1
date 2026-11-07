@@ -113,6 +113,23 @@ class SqliteStore {
     }
   }
 
+  /** Reclaim disk pages after wiping large records so file size drops right away. */
+  compact() {
+    try {
+      this.db.exec('PRAGMA wal_checkpoint(TRUNCATE);');
+      this.db.exec('VACUUM;');
+      this.db.exec('PRAGMA wal_checkpoint(TRUNCATE);');
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  clear() {
+    this.db.exec('DELETE FROM kv;');
+    this.compact();
+  }
+
   close() {
     this.checkpoint();
     try {
@@ -182,6 +199,15 @@ class JsonStore {
 
   checkpoint() {
     return true;
+  }
+
+  compact() {
+    return true;
+  }
+
+  clear() {
+    this.data.kv = {};
+    this.flush();
   }
 
   close() {}

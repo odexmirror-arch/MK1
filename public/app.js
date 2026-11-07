@@ -5146,6 +5146,30 @@ window.restoreDatabaseBackup = async function restoreDatabaseBackup(input) {
   showToast(`Backup restored · ${data.restored?.follows ?? 0} follows, ${data.restored?.history ?? 0} history entries`, 'good');
 };
 
+window.clearStorageAll = async function clearStorageAll() {
+  const ok = await confirmAction({
+    title: 'Clear all storage?',
+    message: 'Deletes all follows, open and closed positions, trade history, live signals, and Dax chat from both local storage (data/odex.db) and Supabase cloud backup. Your API keys in .env are kept.',
+    confirmLabel: 'Clear storage',
+    danger: true,
+  });
+  if (!ok) return;
+  const res = await fetch('/api/db/clear', { method: 'POST' });
+  const data = await res.json().catch(() => ({}));
+  if (!data.ok) return showToast(data.error || 'Could not clear storage', 'danger');
+  if (data.state) engineState = data.state;
+  if (typeof pnlSummary === 'object' && pnlSummary) pnlSummary.at = 0;
+  if (typeof daxc === 'object' && daxc) {
+    daxc.msgs = [];
+    if (typeof renderDaxChat === 'function') renderDaxChat();
+  }
+  renderTerminalAll();
+  populateSettingsInputs();
+  loadLiveSignals();
+  loadDatabaseInfo();
+  showToast(data.cloudCleared ? 'Storage cleared (local database + Supabase cloud).' : 'Local storage cleared.', 'good');
+};
+
 window.addEventListener('DOMContentLoaded', () => {
   loadDatabaseInfo();
   setInterval(() => {
@@ -6068,9 +6092,59 @@ window.saveEditFollow = async function saveEditFollow() {
 // ---------------------------------------------------------------------------
 // Integrations (Settings → Integrations): Telegram + Discord trade alerts
 // ---------------------------------------------------------------------------
-const INTG = { telegram: { short: 'tg', name: 'Telegram' } };
+const INTG = {
+  telegram: { short: 'tg', name: 'Telegram', sub: 'Alerts from your own Telegram bot', logoClass: 'intg-logo-tg', icon: '/icons/telegram.svg' },
+  discord: { short: 'dc', name: 'Discord', sub: 'Channel webhook alerts for buys, sells & PnL', logoClass: 'intg-logo-dc', icon: '/icons/discord.svg' },
+};
+const INTG_META = {
+  ...INTG,
+  dax: { short: 'dax', name: 'Dax Smart Agent (Gemini / Claude)', sub: 'Connects Google Gemini or Claude API so Dax analyzes every trade, wallet & exit', logoClass: 'intg-logo-dax', icon: '/dax/dax.png' },
+};
 const INTG_EVENTS = [['copies', 'Copied buys'], ['sells', 'Sells & PnL'], ['problems', 'Problems']];
 let intgState = null;
+let activeIntgModal = null;
+
+function syncIntegrationModalHead() {
+  if (!activeIntgModal) return;
+  const meta = INTG_META[activeIntgModal];
+  if (!meta) return;
+  const srcPill = document.getElementById(`intg-${meta.short}-pill`);
+  const modalPill = document.getElementById('intg-modal-pill');
+  if (srcPill && modalPill) {
+    modalPill.className = srcPill.className;
+    modalPill.textContent = srcPill.textContent;
+  }
+}
+
+window.openIntegrationModal = function openIntegrationModal(app) {
+  const meta = INTG_META[app];
+  if (!meta) return;
+  activeIntgModal = app;
+  const logo = document.getElementById('intg-modal-logo');
+  const logoImg = document.getElementById('intg-modal-logo-img');
+  const title = document.getElementById('intg-modal-title');
+  const sub = document.getElementById('intg-modal-sub');
+  if (logo) logo.className = `intg-logo ${meta.logoClass}`;
+  if (logoImg) logoImg.src = meta.icon;
+  if (title) title.textContent = meta.name;
+  if (sub) sub.textContent = meta.sub;
+  document.querySelectorAll('#modal-integration [data-intg-pane]').forEach((el) => {
+    el.hidden = el.dataset.intgPane !== app;
+  });
+  if (!intgState) loadIntegrations();
+  else renderIntegrations();
+  syncIntegrationModalHead();
+  const modal = document.getElementById('modal-integration');
+  if (modal) modal.classList.add('open');
+  const focusId = app === 'telegram' ? 'intg-tg-token' : app === 'discord' ? 'intg-dc-hook' : 'intg-dax-key';
+  setTimeout(() => document.getElementById(focusId)?.focus(), 40);
+};
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && document.getElementById('modal-integration')?.classList.contains('open')) {
+    closeModal('modal-integration');
+  }
+});
 
 function intgMsg(app, text, kind = '') {
   const el = document.getElementById(`intg-${INTG[app].short}-msg`);
@@ -6099,6 +6173,7 @@ function renderDaxAi() {
     msg.className = 'intg-msg is-bad';
     msg.textContent = `Last error: ${c.lastError}`;
   }
+  syncIntegrationModalHead();
 }
 function daxAiMsg(text, kind = '') {
   const el = document.getElementById('intg-dax-msg');
@@ -6161,6 +6236,9 @@ function renderIntegrations() {
       if (tok && !tok.value) tok.placeholder = c.tokenMasked ? `Saved: ${c.tokenMasked}` : 'Bot token, e.g. 123456789:AAH…';
       const chat = document.getElementById('intg-tg-chat');
       if (chat && document.activeElement !== chat) chat.value = c.chatId || '';
+    } else if (app === 'discord') {
+      const hook = document.getElementById('intg-dc-hook');
+      if (hook && !hook.value) hook.placeholder = c.hookMasked ? `Saved: ${c.hookMasked}` : 'https://discord.com/api/webhooks/…';
     }
     const ev = document.querySelector(`.intg-events[data-app="${app}"]`);
     if (ev) {
@@ -6168,6 +6246,7 @@ function renderIntegrations() {
     }
     if (c.lastError && !document.getElementById(`intg-${k}-msg`)?.textContent) intgMsg(app, `Last send failed: ${c.lastError.error}`, 'bad');
   }
+  syncIntegrationModalHead();
 }
 
 window.loadIntegrations = async function loadIntegrations() {
@@ -6199,10 +6278,14 @@ window.intgFindTelegramChat = async function intgFindTelegramChat() {
 };
 
 window.intgSave = async function intgSave(app) {
-  const body = { botToken: document.getElementById('intg-tg-token').value.trim(), chatId: document.getElementById('intg-tg-chat').value.trim(), enabled: true };
+  const body =
+    app === 'discord'
+      ? { webhookUrl: document.getElementById('intg-dc-hook').value.trim(), enabled: true }
+      : { botToken: document.getElementById('intg-tg-token').value.trim(), chatId: document.getElementById('intg-tg-chat').value.trim(), enabled: true };
   const d = await intgPost(app, '', body);
   if (!d.ok) return intgMsg(app, d.error, 'bad');
-  document.getElementById('intg-tg-token').value = '';
+  if (app === 'discord') document.getElementById('intg-dc-hook').value = '';
+  else document.getElementById('intg-tg-token').value = '';
   const c = d[app];
   intgMsg(app, c.configured ? 'Saved — alerts are on. Press Send test to check.' : app === 'telegram' ? 'Saved. Add the chat ID (or press Find my chat) to finish.' : 'Saved.', c.configured ? 'good' : '');
 };

@@ -246,3 +246,29 @@ test('settings migration: a saved 20 s real-copy limit (old default) becomes 10 
   restoreEngine(e2, { settings: { maxRealSignalAgeSec: 15 } });
   assert.equal(e2.settings.maxRealSignalAgeSec, 15, 'a value set on purpose is kept');
 });
+
+test('D10 clear storage: wipes kv rows, compacts SQLite file size, and resets traderLog', async () => {
+  const e = seededEngine();
+  e.traderLog = Array.from({ length: 500 }, (_, i) => ({ t: Date.now() - i * 1000, side: 'buy', sym: `COIN${i}` }));
+  await buy(e);
+  const store = await openDatabase({ dir: tmp() });
+  store.set('bigBlob', { pad: 'x'.repeat(250_000) });
+  const p = new PersistenceManager({ engine: e, store });
+  p.saveNow();
+  const sizeBefore = store.sizeBytes();
+  assert.ok(sizeBefore > 200_000, 'database holds bulk payload');
+
+  e.resetToCleanState();
+  assert.equal(e.follows.length, 0);
+  assert.equal(e.positions.length, 0);
+  assert.equal(e.history.length, 0);
+  assert.equal(e.traderLog.length, 0);
+
+  store.clear();
+  p.saveNow();
+  store.compact();
+  const sizeAfter = store.sizeBytes();
+  assert.equal(store.get('bigBlob'), null);
+  assert.ok(sizeAfter < sizeBefore * 0.25, `expected compacted size (${sizeAfter}) << before (${sizeBefore})`);
+  store.close();
+});
