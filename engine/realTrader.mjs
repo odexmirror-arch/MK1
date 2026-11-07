@@ -53,6 +53,37 @@ export function priorityMicroLamportsFor(priorityFee, cuUnits = 100_000, envOver
   return Math.min(150_000_000, Math.max(100_000, micro));
 }
 
+/**
+ * Atomic Jito bundle tip (lamports) for direct pump.fun buys when Jito Block Engine is active.
+ * Transferred via SystemProgram.transfer inside the swap tx (+ `?bundleOnly=true`), so if a swap
+ * reverts (e.g. 6042 price ceiling) the tip rolls back to 0 SOL.
+ */
+export function jitoTipLamportsFor(priorityFee, { side = 'buy', tradeSol = null, hasJito = false, envTipLamports = null } = {}) {
+  if (side !== 'buy' || !hasJito) return 0;
+  if (envTipLamports !== null && envTipLamports !== undefined && String(envTipLamports).trim() !== '') {
+    const ov = Number(envTipLamports);
+    if (Number.isFinite(ov)) {
+      const n = Math.max(0, Math.floor(ov));
+      return n >= 1_000 ? n : 0;
+    }
+  }
+  if (!priorityFee || !priorityFee.mode) return 0;
+  const mode = String(priorityFee.mode).toLowerCase();
+  const sz = Number(tradeSol);
+  const hasSz = Number.isFinite(sz) && sz > 0;
+  let tip = 100_000; // 0.0001 SOL on normal
+  if (mode === 'turbo') {
+    tip = hasSz ? Math.min(1_500_000, Math.max(250_000, Math.round(sz * 2_500_000))) : 1_500_000;
+  } else if (mode === 'fast') {
+    tip = hasSz ? Math.min(600_000, Math.max(150_000, Math.round(sz * 1_500_000))) : 600_000;
+  } else if (mode === 'custom') {
+    const c = Number(priorityFee.customSol);
+    const customSol = Number.isFinite(c) && c > 0 ? Math.min(0.01, Math.max(0.0001, c)) : 0.002;
+    tip = Math.round(customSol * 0.6 * LAMPORTS);
+  }
+  return tip >= 1_000 ? tip : 0;
+}
+
 // ---------- keys & signing ----------
 
 /** Accepts a base58 secret key (64-byte Phantom/Solflare export or 32-byte seed) or a JSON byte array. */
@@ -227,8 +258,13 @@ export class RealTrader {
     // Swap route (Settings): 'jupiter' (default) or 'direct' (pump.fun curve coins, Jupiter fallback)
     this.routeSetting = () => 'jupiter';
     this.priorityMicroLamports = () => 100_000;
+    this.jitoTipLamports = () => 0;
     this.directStats = { direct: 0, fallbacks: 0, priceSkips: 0, lastFallback: null, lastFallbackAt: null, lastDirectAt: null };
     this.blockhashCache = null; // { hash, at }
+  }
+
+  hasJitoEndpoint() {
+    return Array.isArray(this.fastRpcUrls) && this.fastRpcUrls.some((u) => /jito\.wtf/i.test(String(u)));
   }
 
   get address() {
@@ -971,6 +1007,7 @@ export class RealTrader {
     let ixs;
     let minOut;
     let priorityLamports = 0;
+    let tipLamports = 0n;
     try {
       // Every transaction must be unique: two copies of the same size for the same coin, built in the
       // same second with the same cached blockhash, would otherwise be byte-identical — one
@@ -982,11 +1019,24 @@ export class RealTrader {
       const tradeSol = Number(side === 'buy' ? d.lamportsIn : d.lamportsOut) / LAMPORTS;
       const microLamports = this.priorityMicroLamports(units, side, tradeSol);
       priorityLamports = Math.ceil((units * Math.max(0, Number(microLamports) || 0)) / 1_000_000);
+      if (side === 'buy') {
+        const rawTip = Math.max(0, Math.floor(Number(this.jitoTipLamports?.(side, tradeSol) || 0)));
+        tipLamports = BigInt(rawTip >= 1_000 ? rawTip : 0);
+        if (tipLamports > 0n && d.preLamports !== undefined) {
+          const room = d.preLamports - d.lamportsIn - 3_500_000n;
+          if (room < 1_000n) tipLamports = 0n;
+          else if (tipLamports > room) tipLamports = room;
+        }
+      }
       const budget = PD.computeBudgetIxs({ units, microLamports });
       if (side === 'buy') {
         minOut = (d.tokensOut * keep) / 10_000n;
         if (minOut <= 0n) return { fallback: true, error: 'minimum tokens is 0' };
         ixs = [...budget, PD.createAtaIdempotentIx({ payer: this.address, owner: this.address, mint, tokenProgram: d.baseTokenProgram }), PD.buyExactQuoteInIx({ user: this.address, mint, baseTokenProgram: d.baseTokenProgram, lamportsIn: d.lamportsIn, minTokensOut: minOut, buybackFeeRecipient: buyback })];
+        if (tipLamports >= 1_000n) {
+          const tipTo = PD.JITO_TIP_ACCOUNTS[Math.floor(Math.random() * PD.JITO_TIP_ACCOUNTS.length)];
+          ixs.push(PD.systemTransferIx({ from: this.address, to: tipTo, lamports: tipLamports }));
+        }
       } else {
         minOut = (d.lamportsOut * keep) / 10_000n;
         ixs = [...budget, PD.sellIx({ user: this.address, mint, baseTokenProgram: d.baseTokenProgram, amount: d.amount, minSolOutput: minOut, buybackFeeRecipient: buyback })];
@@ -1002,6 +1052,7 @@ export class RealTrader {
     } catch (err) {
       return { fallback: true, error: `sign: ${err.message}` };
     }
+    const bundleOnly = tipLamports >= 1_000n;
     // ----- fastCurve swap: start simulation + blast + send in parallel in the same tick -----
     if (d.fastCurve) {
       if (side === 'buy' && tooLate()) return { late: true, error: "too late to send — it would land past the late-copy limit after the trader's buy" };
@@ -1019,7 +1070,7 @@ export class RealTrader {
     if (d.fastCurve) {
       fastSent = true;
       fastSendStart = this.now();
-      this.blastSignedTransaction(signed.base64);
+      this.blastSignedTransaction(signed.base64, { bundleOnly });
       fastSendP = this.rpc('sendTransaction', [signed.base64, { encoding: 'base64', skipPreflight: true, maxRetries: 3 }]).catch(() => null);
       // Start signature confirmation micro-polling immediately in parallel with simulation & send
       fastConfirmP = this.waitForSignature(fastSig, 25_000);
@@ -1047,10 +1098,10 @@ export class RealTrader {
     let inAmount;
     let outAmount;
     if (side === 'buy') {
-      // tokens received at least the minimum; SOL spent no more than the budget + fees, rent and
+      // tokens received at least the minimum; SOL spent no more than the budget + Jito tip + fees, rent and
       // the one-time pump.fun volume account (≈0.0018 SOL) — 0.006 SOL margin
       if (!fastSent && tokDelta < minOut) return { fallback: true, error: `simulation gave ${tokDelta} tokens, under the ${minOut} minimum` };
-      if (!d.fastCurve && -solDelta > d.lamportsIn + 6_000_000n) return { fallback: true, error: `simulation spent ${-solDelta} lamports, more than expected` };
+      if (!d.fastCurve && -solDelta > d.lamportsIn + tipLamports + 6_000_000n) return { fallback: true, error: `simulation spent ${-solDelta} lamports, more than expected` };
       inAmount = d.lamportsIn;
       outAmount = tokDelta > 0n ? tokDelta : d.tokensOut;
     } else {
@@ -1074,7 +1125,7 @@ export class RealTrader {
       this.sentSigs.set(signed.signature, this.now());
       // ----- send (fast RPCs + main RPC in parallel) and confirm -----
       sendStart = this.now();
-      this.blastSignedTransaction(signed.base64);
+      this.blastSignedTransaction(signed.base64, { bundleOnly });
       try {
         const r = await this.rpc('sendTransaction', [signed.base64, { encoding: 'base64', skipPreflight: true, maxRetries: 3 }]);
         if (typeof r === 'string') sig = r;
@@ -1112,7 +1163,7 @@ export class RealTrader {
       this.mintMetaCache.set(mint, { tokenProgram: d.baseTokenProgram, heldRaw: rem });
     }
     // exact amounts from the simulation as a fallback; readFill prefers the real transaction
-    const exec = { totalInputAmount: String(inAmount), totalOutputAmount: String(outAmount), networkLamports: 5000 + priorityLamports };
+    const exec = { totalInputAmount: String(inAmount), totalOutputAmount: String(outAmount), networkLamports: 5000 + priorityLamports + Number(tipLamports) };
     return { ok: true, signature: sig, exec, inAmount: String(inAmount), sendMs };
   }
 
@@ -1279,7 +1330,7 @@ export class RealTrader {
    * configured fast RPCs (Helius, Alchemy, Jito Block Engine) in parallel with Jupiter `/execute`
    * so the transaction reaches the Solana leader in milliseconds.
    */
-  blastSignedTransaction(signedBase64) {
+  blastSignedTransaction(signedBase64, { bundleOnly = false } = {}) {
     if (!this.fastRpcUrls?.length) return;
     const payload = JSON.stringify({
       jsonrpc: '2.0',
@@ -1287,7 +1338,11 @@ export class RealTrader {
       method: 'sendTransaction',
       params: [signedBase64, { encoding: 'base64', skipPreflight: true, maxRetries: 0 }],
     });
-    for (const url of this.fastRpcUrls) {
+    for (const rawUrl of this.fastRpcUrls) {
+      let url = rawUrl;
+      if (bundleOnly && /jito\.wtf\/api\/v1\/transactions/i.test(String(rawUrl)) && !/[?&]bundleOnly=/i.test(String(rawUrl))) {
+        url = `${rawUrl}${String(rawUrl).includes('?') ? '&' : '?'}bundleOnly=true`;
+      }
       const ctrl = new AbortController();
       const t = setTimeout(() => ctrl.abort(), 5000);
       t.unref?.();

@@ -566,3 +566,65 @@ test('PD22 direct buy 6042 is preserved from waitForSignature even if second RPC
 
 
 
+
+test('PD23 Turbo direct buy with Jito endpoint attaches atomic SystemProgram.transfer tip and blasts ?bundleOnly=true', async () => {
+  const { jitoTipLamportsFor, priorityMicroLamportsFor } = await import('../engine/realTrader.mjs');
+  assert.equal(PD.JITO_TIP_ACCOUNTS.length, 8);
+  for (const acc of PD.JITO_TIP_ACCOUNTS) assert.equal(base58Decode(acc).length, 32);
+
+  assert.equal(jitoTipLamportsFor({ mode: 'turbo' }, { side: 'buy', tradeSol: 0.72, hasJito: true }), 1_500_000);
+  assert.equal(jitoTipLamportsFor({ mode: 'turbo' }, { side: 'sell', tradeSol: 0.72, hasJito: true }), 0);
+  assert.equal(jitoTipLamportsFor({ mode: 'turbo' }, { side: 'buy', tradeSol: 0.72, hasJito: true, envTipLamports: '0' }), 0);
+
+  const { trader, w, token } = world();
+  const blastedUrls = [];
+  trader.fastRpcUrls = [
+    'https://mainnet.helius-rpc.com/?api-key=test',
+    'https://mainnet.block-engine.jito.wtf/api/v1/transactions',
+  ];
+  const pf = { mode: 'turbo', customSol: 0.002 };
+  trader.jitoTipLamports = (side, tradeSol) => jitoTipLamportsFor(pf, { side, tradeSol, hasJito: trader.hasJitoEndpoint() });
+  trader.priorityMicroLamports = (units, side, tradeSol) => {
+    const tip = trader.jitoTipLamports(side, tradeSol);
+    const full = priorityMicroLamportsFor(pf, units, null, { tradeSol });
+    return tip >= 1_000 ? Math.max(1_000_000, Math.round(full * 0.45)) : full;
+  };
+  const origFetch = trader.fetch;
+  trader.fetch = async (url, opts) => {
+    if (String(url).includes('helius') || String(url).includes('jito.wtf')) {
+      blastedUrls.push(String(url));
+      return { ok: true, status: 200, text: async () => JSON.stringify({ jsonrpc: '2.0', id: 1, result: 'ok' }) };
+    }
+    return origFetch(url, opts);
+  };
+
+  const q = await trader.quote({ side: 'buy', token, amountUsd: 65, slippagePct: 15 });
+  const r = await trader.execute({ side: 'buy', token, amountUsd: 65, quote: q, slippagePct: 15, newTokenAccount: true });
+  assert.equal(r.ok, true, r.error);
+
+  const tx = Buffer.from(w.sent[0], 'base64');
+  assert.ok(tx.length <= 1232, `packet fits MTU (${tx.length} bytes)`);
+  const n = tx[0];
+  const m = tx.subarray(1 + 64 * n);
+  const nKeys = m[3];
+  const keys = Array.from({ length: nKeys }, (_, i) => base58Encode(m.subarray(4 + 32 * i, 36 + 32 * i)));
+  let o = 4 + 32 * nKeys + 32;
+  const nIx = m[o++];
+  const ixs = [];
+  for (let i = 0; i < nIx; i++) {
+    const programId = keys[m[o++]];
+    const na = m[o++];
+    const accounts = Array.from({ length: na }, (_, j) => keys[m[o + j]]);
+    o += na;
+    const dl = m[o++];
+    const data = Buffer.from(m.subarray(o, o + dl));
+    o += dl;
+    ixs.push({ programId, accounts, data });
+  }
+  const tipIx = ixs.find((ix) => ix.programId === PD.SYSTEM_PROGRAM && ix.data.length === 12 && ix.data.readUInt32LE(0) === 2);
+  assert.ok(tipIx, 'Jito SystemProgram.transfer tip instruction included');
+  assert.ok(PD.JITO_TIP_ACCOUNTS.includes(tipIx.accounts[1]), `tip sent to official Jito tip account: ${tipIx.accounts[1]}`);
+  assert.equal(tipIx.data.readBigUInt64LE(4), 812_500n, 'size-calibrated Jito tip for 0.325 SOL ($65 @ $200/SOL) buy');
+  assert.ok(blastedUrls.includes('https://mainnet.helius-rpc.com/?api-key=test'), 'Helius URL unchanged');
+  assert.ok(blastedUrls.includes('https://mainnet.block-engine.jito.wtf/api/v1/transactions?bundleOnly=true'), 'Jito blasted with bundleOnly=true');
+});

@@ -49,6 +49,22 @@ export const BUYBACK_FEE_RECIPIENTS = [
   'A7hAgCzFw14fejgCp387JUJRMNyz4j89JKnhtKU8piqW',
 ];
 
+// 8 official mainnet Jito Block Engine tip accounts (getTipAccounts)
+export const JITO_TIP_ACCOUNTS = [
+  'Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY',
+  'HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe',
+  'ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt',
+  '3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT',
+  'DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL',
+  'ADaUMid9yfUytqMBgopwjb2DTLSokTSzL1zt6iGPaS49',
+  'DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh',
+  '96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5',
+];
+
+// Tight compute unit budgets (~85k-95k CU actual on buy with ATA creation; ~50k-65k CU on sell)
+export const DIRECT_BUY_UNITS = 115_000;
+export const DIRECT_SELL_UNITS = 90_000;
+
 // ---------- addresses (verified against pump.fun's published global / event authority / fee config) ----------
 const pdaCache = new Map();
 const pda = (seeds, program) => {
@@ -123,11 +139,100 @@ const u32le = (v) => {
 };
 const meta = (pubkey, isSigner, isWritable) => ({ pubkey, isSigner, isWritable });
 
-export function computeBudgetIxs({ units = 220_000, microLamports = 100_000 } = {}) {
+export function computeBudgetIxs({ units = DIRECT_BUY_UNITS, microLamports = 100_000 } = {}) {
   return [
     { programId: COMPUTE_BUDGET_PROGRAM, keys: [], data: Buffer.concat([Buffer.from([2]), u32le(units)]) },
     { programId: COMPUTE_BUDGET_PROGRAM, keys: [], data: Buffer.concat([Buffer.from([3]), u64le(microLamports)]) },
   ];
+}
+
+export function systemTransferIx({ from, to, lamports }) {
+  return {
+    programId: SYSTEM_PROGRAM,
+    keys: [meta(from, true, true), meta(to, false, true)],
+    data: Buffer.concat([u32le(2), u64le(lamports)]),
+  };
+}
+
+/**
+ * Resolve compute-unit price (microLamports) and optional Jito bundle tip (lamports) for a direct swap
+ * from `settings.priorityFee` ({ mode: 'normal' | 'fast' | 'turbo' | 'custom', customSol }).
+ */
+export function resolveDirectPriority({
+  priorityFee = null,
+  side = 'buy',
+  units = DIRECT_BUY_UNITS,
+  hasJito = false,
+  baseMicroLamports = 100_000,
+  envTipLamports = null,
+} = {}) {
+  const floorMicro = Math.max(0, Math.round(Number(baseMicroLamports) || 0));
+  const cu = Math.max(50_000, Number(units) || DIRECT_BUY_UNITS);
+  const canTip = side === 'buy' && Boolean(hasJito);
+  const explicitTip =
+    envTipLamports !== null && envTipLamports !== undefined && envTipLamports !== '' && Number.isFinite(Number(envTipLamports))
+      ? Math.max(0, Math.round(Number(envTipLamports)))
+      : null;
+
+  if (!priorityFee || typeof priorityFee !== 'object') {
+    return {
+      microLamports: floorMicro || 100_000,
+      jitoTipLamports: canTip && explicitTip !== null ? explicitTip : 0,
+    };
+  }
+
+  const mode = String(priorityFee.mode || 'normal').toLowerCase();
+  let microLamports;
+  let jitoTipLamports = 0;
+
+  if (mode === 'turbo') {
+    if (canTip) {
+      microLamports = Math.max(floorMicro, 7_500_000); // ~0.00086 SOL on 115k CU
+      jitoTipLamports = 1_500_000; // 0.0015 SOL Jito tip (atomic: 0 SOL paid if swap reverts)
+    } else if (side === 'buy') {
+      microLamports = Math.max(floorMicro, 15_000_000); // ~0.00173 SOL on 115k CU
+    } else {
+      microLamports = Math.max(floorMicro, 7_500_000); // ~0.00068 SOL on 90k CU sell
+    }
+  } else if (mode === 'fast') {
+    if (canTip) {
+      microLamports = Math.max(floorMicro, 3_500_000); // ~0.00040 SOL on 115k CU
+      jitoTipLamports = 600_000; // 0.0006 SOL Jito tip
+    } else if (side === 'buy') {
+      microLamports = Math.max(floorMicro, Math.round((1_000_000 * 1_000_000) / cu)); // ~0.001 SOL
+    } else {
+      microLamports = Math.max(floorMicro, 4_000_000); // ~0.00036 SOL on 90k CU sell
+    }
+  } else if (mode === 'custom') {
+    const customSol = Math.min(0.02, Math.max(0.0001, Number(priorityFee.customSol) || 0.002));
+    const totalLamports = Math.round(customSol * 1_000_000_000);
+    if (canTip && totalLamports >= 200_000) {
+      const cuLamports = Math.round(totalLamports * 0.35);
+      microLamports = Math.max(floorMicro, Math.round((cuLamports * 1_000_000) / cu));
+      jitoTipLamports = totalLamports - cuLamports;
+    } else if (side === 'buy') {
+      microLamports = Math.max(floorMicro, Math.round((totalLamports * 1_000_000) / cu));
+    } else {
+      const sellLamports = Math.min(totalLamports, 1_500_000);
+      microLamports = Math.max(floorMicro, Math.round((sellLamports * 1_000_000) / cu));
+    }
+  } else {
+    // 'normal' (Market Auto ~0.0002 SOL)
+    if (canTip) {
+      microLamports = Math.max(floorMicro, 1_000_000); // ~0.000115 SOL
+      jitoTipLamports = 100_000; // 0.0001 SOL
+    } else {
+      microLamports = Math.max(floorMicro, floorMicro > 0 ? floorMicro : 1_000_000);
+    }
+  }
+
+  if (explicitTip !== null) {
+    jitoTipLamports = canTip ? explicitTip : 0;
+  }
+  if (jitoTipLamports > 0 && jitoTipLamports < 1_000) {
+    jitoTipLamports = 0;
+  }
+  return { microLamports, jitoTipLamports };
 }
 
 export function createAtaIdempotentIx({ payer, owner, mint, tokenProgram }) {

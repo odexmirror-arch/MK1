@@ -344,7 +344,10 @@ function calculatePresetRange(preset, lastNum = 7, lastUnit = 'days', includeTod
  *  so they stay correct after midnight; custom ranges are used as picked. */
 function activeDateRange() {
   const st = dateFilterState;
-  if (st.preset === 'custom') return { startDate: st.startDate, endDate: st.endDate };
+  if (st.preset === 'custom') {
+    const endDate = st.endDate || (st.startDate ? new Date(st.startDate).setHours(23, 59, 59, 999) : null);
+    return { startDate: st.startDate, endDate };
+  }
   return calculatePresetRange(st.preset, st.lastNum, st.lastUnit, st.includeToday);
 }
 
@@ -376,12 +379,15 @@ function formatDateRangeLabel(preset, startDate, endDate) {
   if (preset === 'quarters') return 'This quarter';
 
   if (!startDate) return 'Up to ' + new Date(endDate).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
-  if (!endDate) return 'From ' + new Date(startDate).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+  if (!endDate) return new Date(startDate).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
 
   const d1 = new Date(startDate);
   const d2 = new Date(endDate);
   const s1 = d1.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
   const s2 = d2.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+  if (d1.getFullYear() === d2.getFullYear() && d1.getMonth() === d2.getMonth() && d1.getDate() === d2.getDate()) {
+    return s2;
+  }
   return `${s1} – ${s2}`;
 }
 
@@ -452,9 +458,9 @@ window.onDateCellClick = function onDateCellClick(year, month, day) {
   const clickedStart = new Date(year, month, day, 0, 0, 0, 0).getTime();
   const clickedEnd = new Date(year, month, day, 23, 59, 59, 999).getTime();
 
-  if (tempDateFilter.pickStep === 'start' || (tempDateFilter.startDate && tempDateFilter.endDate)) {
+  if (tempDateFilter.pickStep !== 'end' || !tempDateFilter.startDate) {
     tempDateFilter.startDate = clickedStart;
-    tempDateFilter.endDate = null;
+    tempDateFilter.endDate = clickedEnd;
     tempDateFilter.pickStep = 'end';
   } else {
     if (clickedStart < tempDateFilter.startDate) {
@@ -560,6 +566,9 @@ function renderDualCalendars() {
 }
 
 window.applyDateFilter = function applyDateFilter() {
+  if (tempDateFilter.preset === 'custom' && tempDateFilter.startDate && !tempDateFilter.endDate) {
+    tempDateFilter.endDate = new Date(tempDateFilter.startDate).setHours(23, 59, 59, 999);
+  }
   dateFilterState = { ...tempDateFilter };
   const labelText = formatDateRangeLabel(dateFilterState.preset, dateFilterState.startDate, dateFilterState.endDate);
   const btnLabel = document.getElementById('date-filter-label');
@@ -1056,7 +1065,13 @@ function closedSummary(kind) {
 
 function renderClosedPositions() {
   const tbody = document.getElementById('closed-tbody');
-  const all = engineState?.closedPositions || [];
+  const seenClosed = new Set();
+  const all = (engineState?.closedPositions || []).filter((r) => {
+    const k = r.id || `${r.tokenAddress}|${r.openedAt}|${r.closedAt}`;
+    if (seenClosed.has(k)) return false;
+    seenClosed.add(k);
+    return true;
+  });
   const badge = document.getElementById('badge-closed-count');
   if (badge) badge.textContent = String(all.filter((r) => inDateFilter(r.closedAt || r.openedAt)).length);
   if (!tbody) return;

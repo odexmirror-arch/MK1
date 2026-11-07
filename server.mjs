@@ -17,7 +17,7 @@ import { PersistenceManager, serializeEngine, serializeLive } from './engine/per
 import { SupabaseMirror, SUPABASE_TABLE_SQL, isSupabaseUrl } from './engine/supabase.mjs';
 import fsSync from 'node:fs';
 import zlib from 'node:zlib';
-import { RealTrader, priorityMicroLamportsFor } from './engine/realTrader.mjs';
+import { RealTrader, priorityMicroLamportsFor, jitoTipLamportsFor } from './engine/realTrader.mjs';
 import { Notifier } from './engine/notifier.mjs';
 import { buildDaxReport } from './engine/dax.mjs';
 import { DaxChat, smartDaxAnswer, periodFromQuestion } from './engine/daxChat.mjs';
@@ -170,8 +170,18 @@ liveSignals.watcher.onWalletTx = (address, ev) => {
     realTrader.cacheOwnTransaction(ev.signature, ev.tx);
   }
 };
-realTrader.priorityMicroLamports = (units, _side, tradeSol) =>
-  priorityMicroLamportsFor(engine.settings.priorityFee, units, process.env.ODEX_DIRECT_PRIORITY_MICROLAMPORTS, { tradeSol });
+realTrader.jitoTipLamports = (side, tradeSol) =>
+  jitoTipLamportsFor(engine.settings.priorityFee, {
+    side,
+    tradeSol,
+    hasJito: realTrader.hasJitoEndpoint(),
+    envTipLamports: process.env.ODEX_JITO_TIP_LAMPORTS,
+  });
+realTrader.priorityMicroLamports = (units, side, tradeSol) => {
+  const tipLamports = realTrader.jitoTipLamports(side, tradeSol);
+  const fullMicro = priorityMicroLamportsFor(engine.settings.priorityFee, units, process.env.ODEX_DIRECT_PRIORITY_MICROLAMPORTS, { tradeSol });
+  return tipLamports >= 1_000 ? Math.max(1_000_000, Math.round(fullMicro * 0.45)) : fullMicro;
+};
 realTrader.startBlockhashWarmer();
 realTrader.startConnectionWarmer();
 
