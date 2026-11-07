@@ -31,7 +31,7 @@ function connectSseStream() {
     try {
       const payload = JSON.parse(evt.data);
       if (handleLiveSse(payload)) return;
-      if (payload.event === 'position_sold' || payload.event === 'rent_reclaimed' || payload.event === 'records_pruned' || payload.event === 'state_reset' || payload.event === 'history_cleared' || payload.event === 'follow_added' || payload.event === 'follow_removed' || payload.event === 'follows_updated') pnlSummary.at = 0; // refetch totals
+      if (payload.event === 'position_sold' || payload.event === 'rent_reclaimed' || payload.event === 'records_pruned' || payload.event === 'state_reset' || payload.event === 'history_cleared' || payload.event === 'follow_added' || payload.event === 'follow_removed' || payload.event === 'follows_updated') invalidatePnlCaches(); // refetch totals everywhere
       // real trade closed/opened: the bot wallet balance changed on-chain — show it right away
       if (payload.event === 'bot_balance' && payload.data) {
         window.__botStatus = { ...(window.__botStatus || {}), balance: payload.data };
@@ -582,6 +582,9 @@ window.applyDateFilter = function applyDateFilter() {
   renderClosedPositions();
   renderHistoryTable();
   renderLiveSignals();
+  const daxFilterBtn = document.getElementById('dax-filter-btn');
+  if (daxFilterBtn) daxFilterBtn.textContent = labelText === 'All time' ? 'Date filter' : `Filter: ${labelText}`;
+  if (typeof dax === 'object' && dax && dax.period === 'filter') window.loadDax?.('filter');
 };
 
 window.openDepositModal = function openDepositModal(tab = 'deposit') {
@@ -630,6 +633,7 @@ window.resetTerminalData = async function resetTerminalData() {
   const data = await res.json();
   if (data.state) {
     engineState = data.state;
+    invalidatePnlCaches();
     renderTerminalAll();
     showToast('Cleared all test data. Terminal reset to clean 0 baseline.', 'good');
   }
@@ -652,6 +656,7 @@ window.onPaperModeToggle = async function onPaperModeToggle(isChecked) {
   if (engineState && engineState.settings) {
     engineState.settings.paperTrading = isChecked;
   }
+  if (typeof pnlCal === 'object' && pnlCal) pnlCal.modeManual = false;
 
   try {
     const res = await fetch('/api/settings', {
@@ -666,22 +671,23 @@ window.onPaperModeToggle = async function onPaperModeToggle(isChecked) {
   } catch (err) {
     console.error('Failed to update paper trading mode:', err);
   }
+  invalidatePnlCaches();
+  if (engineState) renderTerminalAll();
+
   // Paper OFF = real trading when a bot wallet key is set
   try {
     const rs = await (await fetch('/api/real/status')).json();
     if (!isChecked) {
       if (rs.ready) showToast(`REAL TRADING ON — copies now spend real SOL from ${String(rs.address).slice(0, 4)}…${String(rs.address).slice(-4)}`, 'danger');
       else showToast('Paper Trading is OFF but no bot wallet key is set (ODEX_TRADER_KEY in .env) — nothing will be copied', 'warn');
-    } else if (rs.ready) showToast('Paper Trading ON — real trading stopped', 'good');
+    } else if (rs.ready) {
+      showToast('Paper Trading ON — real trading stopped (simulated copies only)', 'good');
+    } else {
+      showToast('Paper Trading on: followed wallets are copied with live prices, no real funds.', 'good');
+    }
     renderRealPanel(rs);
   } catch {
-    // status is shown again when Settings opens
-  }
-
-  if (isChecked) {
-    showToast('Paper Trading on: followed wallets are copied with live prices, no real funds.', 'good');
-  } else {
-    showToast('Paper Trading off: copying is paused (live trading isn\'t available yet). Signals still show.', 'warn');
+    showToast(isChecked ? 'Paper Trading on: followed wallets are copied with live prices, no real funds.' : 'Paper Trading off.', isChecked ? 'good' : 'warn');
   }
 };
 
@@ -1101,7 +1107,7 @@ function renderClosedPositions() {
     const solExact = S ? S.solExact : solRows.every((r) => r.solExact);
     totals.title = S ? 'All trades closed in this period (the list below keeps the last 2 days)' : '';
     totals.innerHTML = count
-      ? `<span class="closed-stat">${count} trade${count === 1 ? '' : 's'}</span><span class="closed-stat">Win rate <strong>${Math.round((wins / count) * 100)}%</strong></span><span class="closed-stat">Realized <strong class="${pnl >= 0 ? 'pos-up' : 'pos-down'}">${signedUsd(pnl)}</strong>${solRows.length ? `<span class="closed-stat-sol ${pnlSol >= 0 ? 'pos-up' : 'pos-down'}">${solExact ? '' : '≈'}${signedSol(pnlSol)}</span>` : ''}</span>`
+      ? `<span class="closed-stat">${count} trade${count === 1 ? '' : 's'}</span><span class="closed-stat">Win rate <strong>${Math.round((wins / count) * 100)}%</strong></span><span class="closed-stat">Realized <strong class="${pnl >= 0 ? 'pos-up' : 'pos-down'}">${signedUsd(pnl)}</strong>${solRows.length ? `<span class="closed-stat-sol ${pnlSol >= 0 ? 'pos-up' : 'pos-down'}">${solExact ? '' : '≈'}${signedSol(pnlSol)}</span>` : ''}</span><button type="button" class="sig-more-btn" onclick="openPeriodPnlCard()" title="Share Period PnL PNG" aria-label="Share Period PnL PNG" style="margin-left:4px;vertical-align:middle"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15V3"/><polyline points="7 8 12 3 17 8"/><path d="M5 13v6a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-6"/></svg></button>`
       : '';
   }
   const fk = `${dateFilterState.preset}|${traderFilter?.label || ''}|${JSON.stringify(activeDateRange())}|${closedKind}`;
@@ -1178,6 +1184,13 @@ function pnlAmount(usd) {
 // Cards ask for the totals of the selected period + mode; refreshed after each sell.
 // ---------------------------------------------------------------------------
 let pnlSummary = { key: '', data: null, at: 0, loading: '' };
+function invalidatePnlCaches() {
+  pnlSummary.at = 0;
+  closedSummaries.clear();
+  if (document.getElementById('modal-pnl-calendar')?.classList.contains('open')) {
+    window.loadPnlCalendar?.();
+  }
+}
 function pnlSummaryKey() {
   const r = activeDateRange();
   const all = dateFilterState.preset === 'all';
@@ -1295,16 +1308,22 @@ function renderKpiStrip() {
     // % of the money behind it: cost of what was sold in the period + cost of what is still open
     const periodCost = (S ? S.costSold : 0) + periodPositions.reduce((sum, p) => sum + (p.remainingCostUsd || 0), 0);
     const pct = periodCost > 0 ? (totalPeriodPnl / periodCost) * 100 : 0;
-    const sign = totalPeriodPnl >= 0 ? '+' : '';
+    const solPx = Number(engineState?.chains?.solana?.nativePriceUsd) || 0;
+    const periodRealizedSol = S && Number.isFinite(S.realizedSol) ? S.realizedSol : (solPx > 0 ? periodRealized / solPx : null);
+    const periodUnrealizedSol = solPx > 0 ? periodUnrealized / solPx : null;
+    const totalPeriodSol = periodRealizedSol != null ? periodRealizedSol + (periodUnrealizedSol || 0) : null;
+    const mainStr = pnlUnit === 'sol' && totalPeriodSol != null ? signedSol(totalPeriodSol) : pnlAmount(totalPeriodPnl);
+    const realStr = pnlUnit === 'sol' && periodRealizedSol != null ? signedSol(periodRealizedSol) : pnlAmount(periodRealized);
+    const openStr = pnlUnit === 'sol' && periodUnrealizedSol != null ? signedSol(periodUnrealizedSol) : pnlAmount(periodUnrealized);
 
     if (pnlEl) {
-      pnlEl.innerHTML = `${pnlAmount(totalPeriodPnl)}${periodCost > 0 ? ` <span class="kpi-pct">${trendCircle(pct)}${signedPct(pct)}</span>` : ''}`;
+      pnlEl.innerHTML = `${mainStr}${periodCost > 0 ? ` <span class="kpi-pct">${trendCircle(pct)}${signedPct(pct)}</span>` : ''}`;
       pnlEl.className = `kpi-value ${totalPeriodPnl >= 0 ? 'pos-up' : 'pos-down'}`;
     }
     if (pnlSubEl) {
-      pnlSubEl.textContent = pnlUnit === 'sol' && pnlAmount(periodRealized).endsWith(' SOL')
-        ? `Realized ${pnlAmount(periodRealized).replace(' SOL', '')} · Open ${pnlAmount(periodUnrealized)}`
-        : `Realized ${pnlAmount(periodRealized)} · Open ${pnlAmount(periodUnrealized)}`;
+      pnlSubEl.textContent = pnlUnit === 'sol' && realStr.endsWith(' SOL')
+        ? `Realized ${realStr.replace(' SOL', '')} · Open ${openStr}`
+        : `Realized ${realStr} · Open ${openStr}`;
       pnlSubEl.title = `Realized and open PnL for ${filterLabel}`;
     }
   } else {
@@ -2870,12 +2889,7 @@ function roundRectPath(ctx, x, y, w, h, r) {
 
 let pnlCardPos = null;
 
-window.openPnlCard = function openPnlCard(posId, closed = false) {
-  let pos = engineState?.positions.find((p) => p.id === posId);
-  if (!pos && closed) {
-    const c = (engineState?.closedPositions || []).find((p) => p.id === posId);
-    if (c) pos = { ...c, unrealizedPnlPct: c.pnlPct, unrealizedPnlUsd: c.pnlUsd, currentMarketCapUsd: null, isClosed: true };
-  }
+function renderPnlCardModal(pos) {
   if (!pos) return;
   pnlCardPos = pos;
   const canvas = document.getElementById('pnl-canvas');
@@ -2893,6 +2907,113 @@ window.openPnlCard = function openPnlCard(posId, closed = false) {
     canvas.height = off.height;
     canvas.getContext('2d').drawImage(off, 0, 0);
     canvas.classList.add('is-ready');
+  });
+}
+
+window.openPnlCard = function openPnlCard(posId, closed = false) {
+  let pos = engineState?.positions.find((p) => p.id === posId);
+  if (!pos && closed) {
+    const c = (engineState?.closedPositions || []).find((p) => p.id === posId);
+    if (c) pos = { ...c, unrealizedPnlPct: c.pnlPct, unrealizedPnlUsd: c.pnlUsd, currentMarketCapUsd: null, isClosed: true };
+  }
+  if (!pos) return;
+  renderPnlCardModal(pos);
+};
+
+window.openPeriodPnlCard = async function openPeriodPnlCard() {
+  if (!engineState) return;
+  const range = activeDateRange();
+  const hasDateFilter = dateFilterState.preset !== 'all' && (range.startDate || range.endDate);
+  const filterStart = range.startDate || 0;
+  const filterEnd = range.endDate || Infinity;
+  const label = formatDateRangeLabel(dateFilterState.preset, range.startDate, range.endDate);
+  const mode = engineState.settings?.paperTrading === false ? 'real' : 'paper';
+  let S = currentPnlSummary();
+  if (!S) {
+    try {
+      const k = pnlSummaryKey();
+      const d = await (await fetch(`/api/pnl/summary?${new URLSearchParams({ from: String(k.from), to: String(k.to), mode: k.mode })}`)).json();
+      if (d.ok) {
+        pnlSummary = { key: k.key, data: d, at: Date.now(), loading: '' };
+        S = d;
+      }
+    } catch {
+      // fallback to live snapshot
+    }
+  }
+  const solPx = Number(engineState.chains?.solana?.nativePriceUsd) || 0;
+  const periodPositions = hasDateFilter
+    ? engineState.positions.filter((p) => p.openedAt >= filterStart && p.openedAt <= filterEnd && p.remainingTokens > 0)
+    : engineState.positions.filter((p) => p.remainingTokens > 0);
+  const openUnrealized = periodPositions.reduce((sum, p) => sum + (p.unrealizedPnlUsd || 0), 0);
+  const openCost = periodPositions.reduce((sum, p) => sum + (p.remainingCostUsd || p.totalCostUsd || 0), 0);
+  const realizedUsd = S ? S.realized : 0;
+  const realizedSol = S && Number.isFinite(S.realizedSol) ? S.realizedSol : (solPx > 0 ? realizedUsd / solPx : null);
+  const totalUsd = realizedUsd + openUnrealized;
+  const totalSol = realizedSol != null ? realizedSol + (solPx > 0 ? openUnrealized / solPx : 0) : null;
+  const totalCost = (S ? S.costSold : 0) + openCost;
+  const pct = totalCost > 0 ? (totalUsd / totalCost) * 100 : 0;
+  const trades = S ? S.trades : 0;
+  const wins = S ? S.wins : 0;
+  const losses = S ? S.losses : 0;
+  const wr = trades > 0 ? `${((wins / trades) * 100).toFixed(1)}%` : '—';
+  const accent = totalUsd >= 0 ? '#2ee6a0' : '#ff4d7a';
+  const customRows = [
+    ['Total PnL', `${totalCost > 0 ? `${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%` : signedUsd(totalUsd)}${totalSol != null ? `  ·  ${totalSol >= 0 ? '+' : '−'}${fmtSol(Math.abs(totalSol))} SOL` : ''}`, accent],
+    ['Realized', `${signedUsd(realizedUsd)}${realizedSol != null ? `  ·  ${realizedSol >= 0 ? '+' : '−'}${fmtSol(Math.abs(realizedSol))} SOL` : ''}`, realizedUsd >= 0 ? '#2ee6a0' : '#ff4d7a'],
+    ['Open PnL', `${signedUsd(openUnrealized)} (${periodPositions.length} open)`, openUnrealized >= 0 ? '#2ee6a0' : '#ff4d7a'],
+    ['Win rate', `${wr} (${wins}W · ${losses}L)`, '#ffffff'],
+    ['Trades', `${trades} closed · ${S ? S.copiedBuys : 0} copied`, '#a5b4fc'],
+  ];
+  renderPnlCardModal({
+    isSummary: true,
+    isClosed: true,
+    isPaper: mode === 'paper',
+    symbol: label,
+    tokenAddress: `period-${label}-${mode}`,
+    pnlUsd: totalUsd,
+    pnlSol: totalSol,
+    unrealizedPnlPct: pct,
+    customRows,
+    tagline: totalUsd >= 0 ? (trades >= 5 ? 'Dialed in.' : 'Green across the board.') : 'Disciplined execution.',
+    footerLabel: `${mode === 'paper' ? 'Paper analytics' : 'Real SOL analytics'} · ${label} · Odex Mirror`,
+  });
+};
+
+window.openCalendarPnlCard = function openCalendarPnlCard() {
+  const d = pnlCal.data;
+  if (!pnlCal.year) return;
+  const label = new Date(Date.UTC(pnlCal.year, pnlCal.month - 1, 1)).toLocaleString('en-US', { month: 'short', year: 'numeric', timeZone: 'UTC' });
+  const solPx = Number(engineState?.chains?.solana?.nativePriceUsd) || 0;
+  const totalUsd = d?.total ?? 0;
+  const totalSol = d && Number.isFinite(d.totalSol) ? d.totalSol : (solPx > 0 ? totalUsd / solPx : null);
+  const w = d?.wins || { count: 0, usd: 0 };
+  const l = d?.losses || { count: 0, usd: 0 };
+  const trades = w.count + l.count;
+  const wr = trades > 0 ? `${((w.count / trades) * 100).toFixed(1)}%` : '—';
+  const winsSol = d && Number.isFinite(d.winsSol) ? d.winsSol : (solPx > 0 ? w.usd / solPx : null);
+  const lossesSol = d && Number.isFinite(d.lossesSol) ? d.lossesSol : (solPx > 0 ? l.usd / solPx : null);
+  const bestDay = d?.best ? `${label.split(' ')[0]} ${d.best.day} (${signedUsd(d.best.pnl)})` : '—';
+  const accent = totalUsd >= 0 ? '#2ee6a0' : '#ff4d7a';
+  const customRows = [
+    ['Month SOL', totalSol != null ? `${trades} trades  ·  ${totalSol >= 0 ? '+' : '−'}${fmtSol(Math.abs(totalSol))} SOL` : `${trades} trades`, accent],
+    ['Wins', `${w.count} (${formatUsd(w.usd)})${winsSol != null ? `  ·  +${fmtSol(Math.abs(winsSol))} SOL` : ''}`, '#2ee6a0'],
+    ['Losses', `${l.count} (${formatUsd(Math.abs(l.usd))})${lossesSol != null ? `  ·  −${fmtSol(Math.abs(lossesSol))} SOL` : ''}`, '#ff4d7a'],
+    ['Win rate', wr, '#ffffff'],
+    ['Best day', bestDay, '#a5b4fc'],
+  ];
+  renderPnlCardModal({
+    isSummary: true,
+    isClosed: true,
+    isPaper: pnlCal.mode !== 'real',
+    symbol: label,
+    tokenAddress: `cal-${pnlCal.year}-${pnlCal.month}-${pnlCal.mode}`,
+    pnlUsd: totalUsd,
+    pnlSol: totalSol,
+    unrealizedPnlPct: 0,
+    customRows,
+    tagline: totalUsd >= 0 ? 'Strong month on Solana.' : 'Staying sharp.',
+    footerLabel: `${pnlCal.mode === 'real' ? 'Real SOL calendar' : 'Paper calendar'} · ${label} · Odex Mirror`,
   });
 };
 let pnlDrawSeq = 0;
@@ -3092,19 +3213,24 @@ async function drawPnlCard(pos, canvas, S = 2) {
 
   // stats list
   const solVal = pos.pnlSol != null ? Number(pos.pnlSol) : solPx > 0 ? pnlUsd / solPx : null;
-  const rows = [
-    ['PnL', `${pct >= 0 ? '+' : ''}${pct.toFixed(Math.abs(pct) < 10 ? 2 : 1)}%${solVal != null ? `  ·  ${solVal >= 0 ? '+' : '−'}${fmtSol(Math.abs(solVal))} SOL` : ''}`, accent],
-  ];
-  if (pos.isClosed) {
-    rows.push(['Bought', `${formatUsd(pos.boughtUsd)}${pos.boughtSol != null ? `  ·  ${fmtSol(pos.boughtSol)} SOL` : ''}`, green]);
-    rows.push(['Sold', `${formatUsd(pos.soldUsd)}${pos.soldSol != null ? `  ·  ${fmtSol(pos.soldSol)} SOL` : ''}`, red]);
-    rows.push(['Held', pos.closedAt ? durationShort(pos.closedAt - pos.openedAt) : '—', '#ffffff']);
+  let rows;
+  if (Array.isArray(pos.customRows)) {
+    rows = pos.customRows;
   } else {
-    rows.push(['Entry MC', formatMc(pos.entryMarketCapUsd), '#ffffff']);
-    rows.push(['Now MC', pos.currentMarketCapUsd ? formatMc(pos.currentMarketCapUsd) : '—', '#ffffff']);
-    rows.push(['Held', durationShort(Date.now() - (pos.openedAt || Date.now())), '#ffffff']);
+    rows = [
+      ['PnL', `${pct >= 0 ? '+' : ''}${pct.toFixed(Math.abs(pct) < 10 ? 2 : 1)}%${solVal != null ? `  ·  ${solVal >= 0 ? '+' : '−'}${fmtSol(Math.abs(solVal))} SOL` : ''}`, accent],
+    ];
+    if (pos.isClosed) {
+      rows.push(['Bought', `${formatUsd(pos.boughtUsd)}${pos.boughtSol != null ? `  ·  ${fmtSol(pos.boughtSol)} SOL` : ''}`, green]);
+      rows.push(['Sold', `${formatUsd(pos.soldUsd)}${pos.soldSol != null ? `  ·  ${fmtSol(pos.soldSol)} SOL` : ''}`, red]);
+      rows.push(['Held', pos.closedAt ? durationShort(pos.closedAt - pos.openedAt) : '—', '#ffffff']);
+    } else {
+      rows.push(['Entry MC', formatMc(pos.entryMarketCapUsd), '#ffffff']);
+      rows.push(['Now MC', pos.currentMarketCapUsd ? formatMc(pos.currentMarketCapUsd) : '—', '#ffffff']);
+      rows.push(['Held', durationShort(Date.now() - (pos.openedAt || Date.now())), '#ffffff']);
+    }
+    rows.push(['Copied from', `@${String(pos.traderHandle || 'trader').replace(/^@/, '')}`, '#a5b4fc']);
   }
-  rows.push(['Copied from', `@${String(pos.traderHandle || 'trader').replace(/^@/, '')}`, '#a5b4fc']);
   let ry = 300;
   const solMark = (x, y, size) => {
     // three slanted bars, Solana gradient
@@ -3162,13 +3288,13 @@ async function drawPnlCard(pos, canvas, S = 2) {
   // tagline + footer
   ctx.fillStyle = '#ffffff';
   ctx.font = F(400, 44);
-  const tagline = pos.isClosed ? (up ? (pct >= 50 ? 'What a trade!' : 'Nice copy!') : 'On to the next one.') : up ? 'Riding it up.' : 'Still in the game.';
+  const tagline = pos.tagline || (pos.isClosed ? (up ? (pct >= 50 ? 'What a trade!' : 'Nice copy!') : 'On to the next one.') : up ? 'Riding it up.' : 'Still in the game.');
   heavy(tagline, PAD, ry + 44, 1.4);
   ctx.fillStyle = '#9ca3b4';
   ctx.font = F(400, 18);
   const kind = pos.isPaper || engineState?.settings?.paperTrading ? 'Paper trade' : 'Copy trade';
   const when = new Date(pos.closedAt || Date.now()).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
-  ctx.fillText(`${kind} · ${when} · copied in real time with Odex Mirror`, PAD, H - 38);
+  ctx.fillText(pos.footerLabel || `${kind} · ${when} · copied in real time with Odex Mirror`, PAD, H - 38);
 }
 
 window.copyPnlCard = async function copyPnlCard() {
@@ -5139,6 +5265,7 @@ window.restoreDatabaseBackup = async function restoreDatabaseBackup(input) {
   const data = await res.json().catch(() => ({}));
   if (!data.ok) return showToast(data.error || 'Restore failed', 'danger');
   engineState = data.state;
+  invalidatePnlCaches();
   renderTerminalAll();
   populateSettingsInputs();
   loadLiveSignals();
@@ -5158,7 +5285,7 @@ window.clearStorageAll = async function clearStorageAll() {
   const data = await res.json().catch(() => ({}));
   if (!data.ok) return showToast(data.error || 'Could not clear storage', 'danger');
   if (data.state) engineState = data.state;
-  if (typeof pnlSummary === 'object' && pnlSummary) pnlSummary.at = 0;
+  invalidatePnlCaches();
   if (typeof daxc === 'object' && daxc) {
     daxc.msgs = [];
     if (typeof renderDaxChat === 'function') renderDaxChat();
@@ -5373,13 +5500,15 @@ applyRoute(location.pathname);
 // ============================================================================
 // PnL calendar: realized PnL per day (paper or real), from the server's sell log
 // ============================================================================
-const pnlCal = { year: null, month: null, mode: 'paper', best: false, currency: 'usd', data: null };
+const pnlCal = { year: null, month: null, mode: 'paper', modeManual: false, best: false, currency: 'usd', data: null };
 
 window.openPnlCalendar = function openPnlCalendar() {
   const now = new Date();
   if (!pnlCal.year) {
     pnlCal.year = uiPrefs().timeZone === 'utc' ? now.getUTCFullYear() : now.getFullYear();
     pnlCal.month = (uiPrefs().timeZone === 'utc' ? now.getUTCMonth() : now.getMonth()) + 1;
+  }
+  if (!pnlCal.modeManual) {
     pnlCal.mode = engineState?.settings?.paperTrading === false ? 'real' : 'paper';
   }
   document.getElementById('modal-pnl-calendar')?.classList.add('open');
@@ -5388,7 +5517,25 @@ window.openPnlCalendar = function openPnlCalendar() {
 
 window.setPnlCalMode = function setPnlCalMode(mode) {
   pnlCal.mode = mode === 'real' ? 'real' : 'paper';
+  pnlCal.modeManual = true;
   loadPnlCalendar();
+};
+
+window.selectPnlCalDay = function selectPnlCalDay(year, month, day) {
+  const mIdx = Number(month) - 1;
+  const startDate = new Date(Number(year), mIdx, Number(day), 0, 0, 0, 0).getTime();
+  const endDate = new Date(Number(year), mIdx, Number(day), 23, 59, 59, 999).getTime();
+  tempDateFilter = {
+    ...dateFilterState,
+    preset: 'custom',
+    startDate,
+    endDate,
+    viewYear: Number(year),
+    viewMonth: mIdx,
+    pickStep: 'start',
+  };
+  closeModal('modal-pnl-calendar');
+  window.applyDateFilter();
 };
 
 window.togglePnlCalCurrency = function togglePnlCalCurrency() {
@@ -5489,19 +5636,22 @@ function renderPnlCalendar(loading = false) {
   }
 
   const total = d?.total ?? 0;
+  const totalSol = d && Number.isFinite(d.totalSol) ? d.totalSol : (total ? total / solPrice : 0);
   const tot = document.getElementById('pnlc-total');
   const totalStr = isSol
-    ? (total ? signedCalSol(total / solPrice) : '0.00 SOL')
+    ? (totalSol ? signedCalSol(totalSol) : '0.00 SOL')
     : (total ? signedUsd(total) : '$0.00');
   tot.innerHTML = `Total PnL for the month: <strong class="${total > 0 ? 'pos-up' : total < 0 ? 'pos-down' : ''}">${totalStr}</strong>`;
 
   const w = d?.wins || { count: 0, usd: 0 };
   const l = d?.losses || { count: 0, usd: 0 };
+  const wSol = d && Number.isFinite(d.winsSol) ? d.winsSol : (w.usd ? w.usd / solPrice : 0);
+  const lSol = d && Number.isFinite(d.lossesSol) ? Math.abs(d.lossesSol) : (l.usd ? Math.abs(l.usd) / solPrice : 0);
   const winValStr = isSol
-    ? (w.usd ? `${fmtCalSol(w.usd / solPrice)} SOL` : '0.00 SOL')
+    ? (wSol ? `${fmtCalSol(wSol)} SOL` : '0.00 SOL')
     : formatUsd(w.usd);
   const lossValStr = isSol
-    ? (l.usd ? `${fmtCalSol(Math.abs(l.usd) / solPrice)} SOL` : '0.00 SOL')
+    ? (lSol ? `${fmtCalSol(lSol)} SOL` : '0.00 SOL')
     : formatUsd(Math.abs(l.usd));
 
   document.getElementById('pnlc-wins').textContent = `${w.count} / ${winValStr}`;
@@ -5523,17 +5673,19 @@ function renderPnlCalendar(loading = false) {
     const tone = v > 0 ? 'is-up' : v < 0 ? 'is-down' : '';
     const mark = best && d?.best?.day === day ? ' is-best' : ''; // trophy highlights the best day only
     const isToday = `${year}-${month}-${day}` === todayKey ? ' is-today' : '';
-    const vSol = v ? v / solPrice : 0;
-    const valDisplay = isSol ? (v ? signedCalSol(vSol) : '0.00 SOL') : (v ? signedUsd(v) : '$0.00');
-    const valShortDisplay = isSol ? (v ? pnlCalShortSol(vSol) : '0 SOL') : (v ? pnlCalShort(v) : '$0');
-    const pnlTip = isSol ? (v ? signedCalSol(vSol) : '0.00 SOL') : (v ? signedUsd(v) : '$0.00');
-    const tip = c ? `${c.trades} sell${c.trades === 1 ? '' : 's'} · ${c.wins} win${c.wins === 1 ? '' : 's'}, ${c.losses} loss${c.losses === 1 ? '' : 'es'} (${pnlTip})` : 'No sells';
-    html += `<div class="pnlc-cell ${tone}${mark}${isToday}" title="${tip}"><span class="pnlc-day">${day}</span><span class="pnlc-val">${valDisplay}</span><span class="pnlc-val-s">${valShortDisplay}</span>${c?.trades ? `<span class="pnlc-n">${c.trades}</span>` : ''}</div>`;
+    const vSol = c && Number.isFinite(c.sol) ? c.sol : (v ? v / solPrice : 0);
+    const valDisplay = isSol ? (vSol ? signedCalSol(vSol) : '0.00 SOL') : (v ? signedUsd(v) : '$0.00');
+    const valShortDisplay = isSol ? (vSol ? pnlCalShortSol(vSol) : '0 SOL') : (v ? pnlCalShort(v) : '$0');
+    const pnlTip = isSol ? (vSol ? signedCalSol(vSol) : '0.00 SOL') : (v ? signedUsd(v) : '$0.00');
+    const tip = `${c ? `${c.trades} sell${c.trades === 1 ? '' : 's'} · ${c.wins} win${c.wins === 1 ? '' : 's'}, ${c.losses} loss${c.losses === 1 ? '' : 'es'} (${pnlTip})` : 'No sells'} · Click to filter terminal to this day`;
+    html += `<div class="pnlc-cell ${tone}${mark}${isToday}" title="${tip}" onclick="selectPnlCalDay(${year}, ${month}, ${day})"><span class="pnlc-day">${day}</span><span class="pnlc-val">${valDisplay}</span><span class="pnlc-val-s">${valShortDisplay}</span>${c?.trades ? `<span class="pnlc-n">${c.trades}</span>` : ''}</div>`;
   }
   document.getElementById('pnlc-grid').innerHTML = html;
   const note = document.getElementById('pnlc-note');
   if (note) {
-    const bestStr = d?.best ? (isSol ? signedCalSol(d.best.pnl / solPrice) : signedUsd(d.best.pnl)) : '';
+    const bestDayCell = d?.best ? d?.days?.[d.best.day] : null;
+    const bestSol = bestDayCell && Number.isFinite(bestDayCell.sol) ? bestDayCell.sol : (d?.best ? d.best.pnl / solPrice : 0);
+    const bestStr = d?.best ? (isSol ? signedCalSol(bestSol) : signedUsd(d.best.pnl)) : '';
     const worstStr = d?.worst ? (isSol ? signedCalSol(d.worst.pnl / solPrice) : signedUsd(d.worst.pnl)) : '';
 
     note.textContent = loading
@@ -6360,7 +6512,7 @@ window.applyFastScalp = async function applyFastScalp() {
 const dax = { period: '24h', report: null, loading: false, settings: null };
 try {
   const p = localStorage.getItem('odex.daxPeriod');
-  if (['today', '24h', '7d', 'all'].includes(p)) dax.period = p;
+  if (['today', '24h', '7d', 'all', 'filter'].includes(p)) dax.period = p;
 } catch {
   // storage unavailable
 }
@@ -6401,6 +6553,17 @@ function daxMarkdownHtml(md) {
   return out.join('');
 }
 
+function daxQueryParams() {
+  if (dax.period === 'filter') {
+    const r = activeDateRange();
+    const all = dateFilterState.preset === 'all';
+    const from = all ? 0 : Number(r.startDate) || 0;
+    const to = all ? Date.now() : Number(r.endDate) || Date.now();
+    return { period: 'filter', from: String(from), to: String(to), label: dateFilterText() };
+  }
+  return { period: dax.period };
+}
+
 window.loadDax = async function loadDax(period) {
   if (period) {
     dax.period = period;
@@ -6410,12 +6573,18 @@ window.loadDax = async function loadDax(period) {
       // ignore
     }
   }
+  const daxFilterBtn = document.getElementById('dax-filter-btn');
+  if (daxFilterBtn) {
+    const lbl = dateFilterText();
+    daxFilterBtn.textContent = lbl === 'All time' ? 'Date filter' : `Filter: ${lbl}`;
+  }
   document.querySelectorAll('#dax-period .seg-btn').forEach((b) => b.classList.toggle('active', b.dataset.p === dax.period));
   const meta = document.getElementById('dax-meta');
   if (meta) meta.textContent = 'Dax is writing the report…';
   dax.loading = true;
   try {
-    const d = await (await fetch(`/api/dax/report?period=${encodeURIComponent(dax.period)}`, { cache: 'no-store' })).json();
+    const q = new URLSearchParams(daxQueryParams());
+    const d = await (await fetch(`/api/dax/report?${q}`, { cache: 'no-store' })).json();
     if (!d.ok) throw new Error(d.error || 'report failed');
     dax.report = d;
     dax.settings = d.dax || null;
@@ -6543,7 +6712,7 @@ window.sendDaxReport = async function sendDaxReport() {
   const btn = document.getElementById('dax-send');
   if (btn) btn.disabled = true;
   try {
-    const d = await (await fetch('/api/dax/send', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ period: dax.period }) })).json();
+    const d = await (await fetch('/api/dax/send', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(daxQueryParams()) })).json();
     if (!d.ok) return showToast(d.error || 'Dax could not send the report', 'danger');
     const to = [d.sent?.telegram ? 'Telegram' : null, d.sent?.discord ? 'Discord' : null].filter(Boolean).join(' + ');
     showToast(`Dax sent the report to ${to}`, 'good');

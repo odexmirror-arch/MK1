@@ -7165,3 +7165,32 @@ body.logged-out .cfg-signout{display:none}
 }
 .intg-modal-head .intg-logo { width: 46px; height: 46px; border-radius: 13px; }
 .intg-pane[hidden] { display: none !important; }
+
+/* Connected PnL / Period PNG Share & Clickable Calendar Days */
+.kpi-share-btn {
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 21px;
+  margin-left: 5px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-mute);
+  cursor: pointer;
+  flex: none;
+}
+.kpi-share-btn:hover {
+  background: rgba(255, 255, 255, 0.10);
+  color: var(--text);
+}
+.kpi-share-btn + .kpi-chevron { display: none; }
+@media (max-width: 720px) {
+  .kpi-share-btn { display: none; }
+  .kpi-share-btn + .kpi-chevron { display: inline-flex; }
+}
+.pnlc-cell:not(.is-pad) { cursor: pointer; }
+.pnlc-cell:not(.is-pad):hover {
+  border-color: rgba(165, 180, 252, 0.45) !important;
+  transform: translateY(-1px);
+}

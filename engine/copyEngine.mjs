@@ -2292,9 +2292,19 @@ export class CopyTradingEngine {
     const y = Number(year);
     const m = Number(month); // 1–12
     const shift = -Number(tzOffsetMin || 0) * 60_000; // UTC → local
+    const px = Number(CHAINS.solana?.nativePriceUsd) || 0;
     const days = {};
     const wins = { count: 0, usd: 0 };
     const losses = { count: 0, usd: 0 };
+    let winsSol = 0;
+    let lossesSol = 0;
+    let solExact = true;
+    const solByPid = new Map();
+    for (const r of this.realizedLog || []) {
+      if (Boolean(r.paper) !== Boolean(paper) || !Number.isFinite(r.pnl) || !r.pid) continue;
+      if (Number.isFinite(r.sol)) solByPid.set(r.pid, (solByPid.get(r.pid) || 0) + r.sol);
+      else if (px > 0) solByPid.set(r.pid, (solByPid.get(r.pid) || 0) + r.pnl / px);
+    }
     let first = null;
     for (const r of this.realizedLog || []) {
       if (Boolean(r.paper) !== Boolean(paper) || !Number.isFinite(r.pnl)) continue;
@@ -2302,40 +2312,56 @@ export class CopyTradingEngine {
       if (first === null || r.t < first) first = r.t;
       if (d.getUTCFullYear() !== y || d.getUTCMonth() + 1 !== m) continue;
       const day = d.getUTCDate();
-      const cell = days[day] || (days[day] = { pnl: 0, trades: 0, wins: 0, losses: 0 });
+      const cell = days[day] || (days[day] = { pnl: 0, sol: 0, trades: 0, wins: 0, losses: 0 });
       cell.pnl += r.pnl;
+      if (Number.isFinite(r.sol)) cell.sol += r.sol;
+      else {
+        solExact = false;
+        if (px > 0) cell.sol += r.pnl / px;
+      }
       // same trade counting as pnlSummary (win-rate card): one trade = one closed position,
       // won or lost on its whole PnL; older rows without the mark count one sell as one trade
       const closesTrade = r.closes === undefined || r.closes;
       if (!closesTrade) continue;
       const tradePnl = r.closes === undefined ? r.pnl : Number.isFinite(r.posPnl) ? r.posPnl : r.pnl;
+      const tradeSol = r.closes === undefined
+        ? (Number.isFinite(r.sol) ? r.sol : px > 0 ? r.pnl / px : 0)
+        : (r.pid && solByPid.has(r.pid) ? solByPid.get(r.pid) : Number.isFinite(r.sol) ? r.sol : px > 0 ? tradePnl / px : 0);
       cell.trades += 1;
       if (tradePnl > 0) {
         cell.wins += 1;
         wins.count += 1;
         wins.usd += tradePnl;
+        winsSol += tradeSol;
       } else if (tradePnl < 0) {
         cell.losses += 1;
         losses.count += 1;
         losses.usd += tradePnl;
+        lossesSol += tradeSol;
       }
     }
     let best = null;
     let worst = null;
     for (const [day, c] of Object.entries(days)) {
       c.pnl = Number(c.pnl.toFixed(2));
+      c.sol = Number(c.sol.toFixed(4));
       if (!best || c.pnl > best.pnl) best = { day: Number(day), pnl: c.pnl };
       if (!worst || c.pnl < worst.pnl) worst = { day: Number(day), pnl: c.pnl };
     }
     const total = Object.values(days).reduce((a, c) => a + c.pnl, 0);
+    const totalSol = Object.values(days).reduce((a, c) => a + c.sol, 0);
     return {
       year: y,
       month: m,
       paper: Boolean(paper),
       days,
       total: Number(total.toFixed(2)),
+      totalSol: Number(totalSol.toFixed(4)),
+      solExact,
       wins: { count: wins.count, usd: Number(wins.usd.toFixed(2)) },
       losses: { count: losses.count, usd: Number(losses.usd.toFixed(2)) },
+      winsSol: Number(winsSol.toFixed(4)),
+      lossesSol: Number(lossesSol.toFixed(4)),
       best: best && best.pnl > 0 ? best : null,
       worst: worst && worst.pnl < 0 ? worst : null,
       firstTradeAt: first,

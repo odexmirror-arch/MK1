@@ -15,8 +15,14 @@ import { CHAINS } from './chainAdapters.mjs';
 const HOUR = 3600_000;
 const DAY = 24 * HOUR;
 
-/** Report period from a preset: 'today' (UTC day so far), '24h', '7d', 'all'. */
-export function daxPeriod(preset = '24h', now = Date.now()) {
+/** Report period from a preset: 'today' (UTC day so far), '24h', '7d', 'all', or custom { from, to, label }. */
+export function daxPeriod(preset = '24h', now = Date.now(), custom = null) {
+  if ((preset === 'custom' || preset === 'filter') && custom && (Number(custom.from) > 0 || Number(custom.to) > 0)) {
+    const f = Math.max(0, Number(custom.from) || 0);
+    const t = Number(custom.to) > 0 ? Number(custom.to) : now;
+    const lbl = String(custom.label || '').trim().slice(0, 64) || `${f ? new Date(f).toISOString().slice(0, 10) : 'Start'} – ${new Date(t).toISOString().slice(0, 10)}`;
+    return { preset: 'filter', label: lbl, from: f, to: Math.max(f, t) };
+  }
   if (preset === 'today') {
     const d = new Date(now);
     return { preset, label: 'Today (UTC)', from: Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()), to: now };
@@ -102,9 +108,9 @@ function adviceForSkip(reason) {
  * @param opts { period: 'today'|'24h'|'7d'|'all', now }
  * @returns { period, data, findings, markdown, summaryText }
  */
-export function buildDaxReport(ctx, { period = '24h', now = Date.now() } = {}) {
+export function buildDaxReport(ctx, { period = '24h', from = 0, to = 0, label = '', now = Date.now() } = {}) {
   const { engine, realTrader = null, live = null, extra = {} } = ctx;
-  const P = daxPeriod(period, now);
+  const P = daxPeriod(period, now, { from, to, label });
   const inP = (t) => Number.isFinite(t) && t >= P.from && t <= P.to;
   const follows = engine.follows || [];
   const followById = new Map(follows.map((f) => [f.id, f]));

@@ -400,8 +400,11 @@ function daxPublicSettings() {
   const c = notifier.cfg();
   return { ...d, telegram: Boolean(c.telegram.enabled), discord: Boolean(c.discord.enabled) };
 }
-function daxReport(period) {
-  return buildDaxReport({ engine, realTrader, live: liveSignals, extra: { region: process.env.RAILWAY_REPLICA_REGION || null, version: process.env.RAILWAY_GIT_COMMIT_SHA || null } }, { period });
+function daxReport(period, custom = null) {
+  return buildDaxReport(
+    { engine, realTrader, live: liveSignals, extra: { region: process.env.RAILWAY_REPLICA_REGION || null, version: process.env.RAILWAY_GIT_COMMIT_SHA || null } },
+    { period, from: custom?.from || 0, to: custom?.to || 0, label: custom?.label || '' },
+  );
 }
 function daxFilename(rep) {
   return `dax-report-${rep.period.preset}-${new Date(rep.generatedAt).toISOString().slice(0, 16).replace(/[:T]/g, '-')}.md`;
@@ -1149,8 +1152,12 @@ export const server = http.createServer(async (req, res) => {
     }
     // Dax, the report agent: one report of every trade section for a period (password protected)
     if (req.method === 'GET' && pathname === '/api/dax/report') {
-      const period = ['today', '24h', '7d', 'all'].includes(url.searchParams.get('period')) ? url.searchParams.get('period') : '24h';
-      const rep = daxReport(period);
+      const period = ['today', '24h', '7d', 'all', 'filter', 'custom'].includes(url.searchParams.get('period')) ? url.searchParams.get('period') : '24h';
+      const rep = daxReport(period, {
+        from: Number(url.searchParams.get('from')) || 0,
+        to: Number(url.searchParams.get('to')) || 0,
+        label: url.searchParams.get('label') || '',
+      });
       if (url.searchParams.get('format') === 'md') {
         res.writeHead(200, { 'Content-Type': 'text/markdown; charset=utf-8', 'Content-Disposition': `inline; filename="${daxFilename(rep)}"`, 'Cache-Control': 'no-store' });
         return res.end(rep.markdown);
@@ -1187,8 +1194,8 @@ export const server = http.createServer(async (req, res) => {
     }
     if (req.method === 'POST' && pathname === '/api/dax/send') {
       const body = await readJsonBody(req);
-      const period = ['today', '24h', '7d', 'all'].includes(body.period) ? body.period : '24h';
-      const rep = daxReport(period);
+      const period = ['today', '24h', '7d', 'all', 'filter', 'custom'].includes(body.period) ? body.period : '24h';
+      const rep = daxReport(period, { from: Number(body.from) || 0, to: Number(body.to) || 0, label: body.label || '' });
       const sent = await notifier.sendReport({ summary: rep.summaryText, markdown: rep.markdown, filename: daxFilename(rep) }, body.to || null);
       const anyApp = sent.telegram !== null || sent.discord !== null;
       if (!anyApp) return sendJson(res, 400, { ok: false, error: 'Connect Telegram or Discord first (Settings → Integrations).' });

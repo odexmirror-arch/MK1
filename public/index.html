@@ -216,6 +216,7 @@
             <div class="kpi-unit" role="group" aria-label="Show PnL in" onclick="event.stopPropagation()">
               <button type="button" data-unit="usd" onclick="setPnlUnit('usd')">USD</button><button type="button" data-unit="sol" onclick="setPnlUnit('sol')">SOL</button>
             </div>
+            <button type="button" class="kpi-share-btn" onclick="event.stopPropagation(); openPeriodPnlCard()" title="Share Period PnL PNG" aria-label="Share Period PnL PNG"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15V3"/><polyline points="7 8 12 3 17 8"/><path d="M5 13v6a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-6"/></svg></button>
             <svg class="kpi-chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
           </div>
           <div class="kpi-value pos-up" id="kpi-unrealized-pnl" title="Click to switch USD / SOL" onclick="event.stopPropagation(); setPnlUnit(pnlUnit === 'usd' ? 'sol' : 'usd')" style="cursor:pointer">+$0.00 <span class="kpi-pct">(+0.0%)</span></div>
@@ -984,6 +985,7 @@
           <button type="button" class="seg-btn active" data-p="24h" onclick="loadDax('24h')">24 hours</button>
           <button type="button" class="seg-btn" data-p="7d" onclick="loadDax('7d')">7 days</button>
           <button type="button" class="seg-btn" data-p="all" onclick="loadDax('all')">All</button>
+          <button type="button" class="seg-btn" data-p="filter" id="dax-filter-btn" onclick="loadDax('filter')" title="Analyze the active Date Filter range">Date filter</button>
         </div>
         <div class="dax-actions">
           <button type="button" class="btn btn-primary btn-sm" onclick="copyDaxReport()">Copy report for Claude</button>
@@ -1344,6 +1346,7 @@
       <div class="pnlcard-actions">
         <button class="btn" onclick="copyPnlCard()"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>Copy image</button>
         <button class="btn btn-primary" onclick="downloadPnlCard()"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>Download PNG</button>
+        <button class="btn" onclick="closeModal('modal-pnl-card')">Close</button>
       </div>
     </div>
   </div>
@@ -1473,6 +1476,7 @@
             <span class="pnlc-cur-unit cur-sol">SOL</span>
           </button>
           <button type="button" class="pnlc-ico pnlc-trophy" id="pnlc-best-btn" onclick="togglePnlBest()" title="Highlight the best day" aria-label="Highlight the best day"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 21h8M12 17v4M7 4h10v5a5 5 0 0 1-10 0V4z"/><path d="M17 5h3v2a3 3 0 0 1-3 3M7 5H4v2a3 3 0 0 0 3 3"/></svg></button>
+          <button type="button" class="pnlc-ico" onclick="openCalendarPnlCard()" title="Share Month PnL PNG" aria-label="Share Month PnL PNG"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15V3"/><polyline points="7 8 12 3 17 8"/><path d="M5 13v6a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-6"/></svg></button>
           <button type="button" class="pnlc-ico" onclick="closeModal('modal-pnl-calendar')" aria-label="Close"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
         </div>
       </div>

@@ -259,4 +259,40 @@ test('paper mode enforces maxChasePct ceiling when post-delay live curve price s
   assert.equal(e.positions.length, 0, 'no paper position opened above maxChasePct ceiling');
 });
 
+test('date filter, PnL calendar SOL, PnL summary SOL, and Dax custom filter range stay connected even after SOL price moves', async () => {
+  const { buildDaxReport } = await import('../engine/dax.mjs');
+  const { CHAINS } = await import('../engine/chainAdapters.mjs');
+  const prevPx = CHAINS.solana.nativePriceUsd;
+  try {
+    const { e, f } = setup();
+    e.settings.copyTopUps = true;
+    CHAINS.solana.nativePriceUsd = 200; // $200/SOL at trade time
+    const tStart = Date.now() - 1000;
+    await e.processTraderSignal(sig(f, { address: 'connMint1pump', traderFillPriceUsd: 0.00002, currentPriceUsd: 0.00002 }));
+    const p1 = e.positions[0];
+    p1.currentPriceUsd = p1.entryPriceUsd * 1.5; // +50% win
+    await e.executePositionSell(p1.id, { sellPct: 100 });
+    const tEnd = Date.now() + 1000;
+
+    // Later, SOL price halves to $100 — historical trade SOL PnL must remain exact!
+    CHAINS.solana.nativePriceUsd = 100;
+    const sum = e.pnlSummary({ from: tStart, to: tEnd, paper: true });
+    const now = new Date();
+    const cal = e.pnlCalendar({ year: now.getUTCFullYear(), month: now.getUTCMonth() + 1, tzOffsetMin: 0, paper: true });
+    const daxRep = buildDaxReport({ engine: e }, { period: 'filter', from: tStart, to: tEnd, label: 'Custom Range' });
+
+    assert.equal(sum.solExact, true);
+    assert.equal(cal.solExact, true);
+    assert.ok(Math.abs(sum.realizedSol - cal.totalSol) <= 0.0002, `summary SOL ${sum.realizedSol} vs calendar SOL ${cal.totalSol}`);
+    assert.ok(Math.abs(sum.realizedSol - cal.winsSol) <= 0.0002, `winsSol ${cal.winsSol} matches exact trade SOL`);
+    assert.equal(daxRep.period.preset, 'filter');
+    assert.equal(daxRep.period.label, 'Custom Range');
+    assert.equal(daxRep.period.from, tStart);
+    assert.equal(daxRep.period.to, tEnd);
+  } finally {
+    CHAINS.solana.nativePriceUsd = prevPx;
+  }
+});
+
+
 
