@@ -940,9 +940,6 @@ export class RealTrader {
       curve = PD.decodeCurve(curveAcc.data?.[0]);
       const blocker = PD.directBlocker(curve);
       if (blocker) {
-        if (side === 'buy' && blocker === 'curve is not priced in SOL') {
-          throw Object.assign(new Error('curve is not priced in SOL (token-paired curve skipped)'), { skipBuy: true });
-        }
         this.noteFallback(blocker);
         return null;
       }
@@ -1293,7 +1290,7 @@ export class RealTrader {
       if (since && x.blockTime && x.blockTime * 1000 < since - 60_000) continue;
       let tx;
       try {
-        tx = await this.rpc('getTransaction', [x.signature, { encoding: 'jsonParsed', maxSupportedTransactionVersion: 0, commitment: 'confirmed' }]);
+        tx = await this.rpc('getTransaction', [x.signature, { encoding: 'jsonParsed', maxSupportedTransactionVersion: 1, commitment: 'confirmed' }]);
       } catch {
         continue;
       }
@@ -1873,7 +1870,7 @@ export class RealTrader {
     const waitMs = haveExecAmounts ? 45 : 200;
     for (let i = 0; i < maxTries && !tx; i++) {
       try {
-        tx = await this.rpc('getTransaction', [signature, { encoding: 'jsonParsed', maxSupportedTransactionVersion: 0, commitment: 'confirmed' }]);
+        tx = await this.rpc('getTransaction', [signature, { encoding: 'jsonParsed', maxSupportedTransactionVersion: 1, commitment: 'confirmed' }]);
       } catch {
         tx = null;
       }

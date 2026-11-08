@@ -222,9 +222,10 @@ export function parseSwapFromTransaction(tx, wallet) {
   const swapVenue = keys.includes(PUMP_CURVE_PROGRAM) ? 'pumpfun' : keys.includes(PUMP_AMM_PROGRAM) ? 'pumpswap' : keys.includes(RAYDIUM_LAUNCHLAB_PROGRAM) ? 'launchlab' : null;
   const llEv = swapVenue === 'launchlab' && Array.isArray(meta.logMessages) ? launchLabTradeFromLogs(meta.logMessages) : null;
   const llSol = llEv && llEv.poolSolLamports > 0 ? llEv.poolSolLamports / LAMPORTS_PER_SOL : null;
+  const llSolValid = quote.symbol === 'SOL' && llSol > 0 && llSol >= quote.amount * 0.7 && llSol <= quote.amount * 1.05 + 1e-9;
   const poolQuote =
     quote.symbol === 'SOL'
-      ? llSol > 0 && llSol <= quote.amount * 1.05 + 1e-9
+      ? llSolValid
         ? llSol
         : poolSolLeg(tx, wallet, { side, mint: tok.mint, venue: swapVenue, walletSol: quote.amount })
       : null;
@@ -250,7 +251,7 @@ export function parseSwapFromTransaction(tx, wallet) {
     // where it traded: decided from the programs in the transaction, not from a data feed
     venue: swapVenue,
     curve:
-      llEv && llEv.virtualSolReserves > 0 && llEv.virtualTokenReserves > 0
+      llSolValid && llEv && llEv.virtualSolReserves > 0 && llEv.virtualTokenReserves > 0
         ? {
             virtualSolReserves: llEv.virtualSolReserves,
             virtualTokenReserves: llEv.virtualTokenReserves,
@@ -748,10 +749,6 @@ export class SolanaWalletWatcher {
       if (r.forged) this.fastStats.forged += 1;
       this.fastStats.misses += 1;
       this.fastStats.missReasons[r.skip] = (this.fastStats.missReasons[r.skip] || 0) + 1;
-      if (r.nonSolBuy) {
-        this.seenSigs.add(ev.signature);
-        return;
-      }
     }
     if (this.fastDetect() && ev.tx) {
       const keys = ev.tx.transaction?.message?.accountKeys || [];
@@ -836,11 +833,8 @@ export class SolanaWalletWatcher {
         this.fastStats.misses += 1;
         this.fastStats.missReasons[swap.skip] = (this.fastStats.missReasons[swap.skip] || 0) + 1;
       }
-      if (swap?.nonSolBuy) this.seenSigs.add(sig);
-      else if (!swap?.skip) {
-        this.streamQueue.push({ w, ev });
-        this.drainStream();
-      }
+      this.streamQueue.push({ w, ev });
+      this.drainStream();
       return null;
     }
     this.fastStats.hits += 1;
@@ -1697,7 +1691,7 @@ export class SolanaWalletWatcher {
     let block = null;
     for (let attempt = 0; attempt < 10 && this.running; attempt++) {
       try {
-        block = await this.rpc('getBlock', [slot, { encoding: 'json', transactionDetails: 'accounts', maxSupportedTransactionVersion: 0, rewards: false, commitment: 'confirmed' }], { fast: true });
+        block = await this.rpc('getBlock', [slot, { encoding: 'json', transactionDetails: 'accounts', maxSupportedTransactionVersion: 1, rewards: false, commitment: 'confirmed' }], { fast: true });
         if (block) break;
         if (attempt >= 1) return null; // an empty answer (not 'not available yet'): this RPC can't serve it
       } catch (err) {

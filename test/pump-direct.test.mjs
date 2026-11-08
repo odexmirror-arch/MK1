@@ -472,19 +472,17 @@ test('PD19 direct buy blasts fastRpcUrls before awaiting primary sendTransaction
   assert.ok(sleepIntervals.some((ms) => ms > 0 && ms <= 100), `expected stepped <=100ms status poll interval, got ${sleepIntervals.join(', ')}`);
 });
 
-test('PD20 non-SOL-paired pump.fun curve skips BUY immediately without falling back to Jupiter, while SELL still falls back to Jupiter', async () => {
+test('PD20 non-SOL-paired pump.fun curve falls back to Jupiter on both BUY and SELL', async () => {
   const otherMint = 'MsGDybWRSNdNXkdDZhEksgzugT5CbVWUG2wkhwgpump';
   const { trader, w, token } = world({ curve: curveBytes({ quoteMint: otherMint }), heldTokens: 5_000_000_000n });
-  await assert.rejects(
-    trader.quote({ side: 'buy', token, amountUsd: 10, slippagePct: 10 }),
-    (err) => err?.skipBuy === true && /curve is not priced in SOL/i.test(err.message),
-  );
-  assert.equal(w.jupiterOrders, 0, 'buy never falls back to 2-hop Jupiter quote');
+  await assert.rejects(trader.quote({ side: 'buy', token, amountUsd: 10, slippagePct: 10 }));
+  assert.ok(w.jupiterOrders >= 1, 'buy falls back to 2-hop Jupiter quote');
   assert.equal(w.sent.length, 0);
 
-  // Sells on non-SOL-paired curves still fall back to Jupiter so existing holdings can always exit
+  // Sells on non-SOL-paired curves also fall back to Jupiter so existing holdings can always exit
+  const beforeSellOrders = w.jupiterOrders;
   await assert.rejects(trader.quote({ side: 'sell', token, amountUsd: 10, tokenAmount: 'all', slippagePct: 15 }));
-  assert.ok(w.jupiterOrders >= 1, 'sell falls back to Jupiter');
+  assert.ok(w.jupiterOrders > beforeSellOrders, 'sell falls back to Jupiter');
 });
 
 test('PD21 Yellowstone gRPC TradeEvent curve reserves skip getMultipleAccounts RPC call on direct buy', async () => {
