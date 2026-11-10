@@ -879,3 +879,75 @@ test('S19 paperDelayMsFor models realistic >=650 ms Solana confirmed latency ins
   assert.equal(paperDelayMsFor({ chainId: 'solana', side: 'buy', token: launchLabTok, swapRoute: 'direct' }), 950);
   assert.equal(paperDelayMsFor({ chainId: 'solana', side: 'sell', token: launchLabTok, swapRoute: 'direct' }), 1000);
 });
+
+test('S20 fastCurve direct buy reads actual post-land tokens (not pre-trade simulated d.tokensOut) so trailing stop never false-arms and direct sell never fails with 6023', async () => {
+  const { privateKey, publicKey } = crypto.generateKeyPairSync('ed25519');
+  const seed = privateKey.export({ format: 'der', type: 'pkcs8' }).subarray(-32);
+  const pub = publicKey.export({ format: 'der', type: 'spki' }).subarray(-32);
+  const secret = base58Encode(Buffer.concat([seed, pub]));
+  const MINT = base58Encode(crypto.randomBytes(32));
+
+  const actualOnChainTokensRaw = 1_124_765_256_268n;
+  let walletHeldRaw = 0n;
+
+  const trader = new RealTrader({
+    env: { ODEX_TRADER_KEY: secret },
+    solPrice: () => 200,
+    rpc: async (method, params) => {
+      if (method === 'getLatestBlockhash') return { value: { blockhash: base58Encode(crypto.randomBytes(32)) } };
+      if (method === 'getBalance') return { value: 5_000_000_000 };
+      if (method === 'simulateTransaction') {
+        return { value: { err: null, accounts: [{ lamports: 4_950_000_000 }, { data: [Buffer.alloc(165).toString('base64'), 'base64'] }] } };
+      }
+      if (method === 'sendTransaction') {
+        if (walletHeldRaw === 0n) walletHeldRaw = actualOnChainTokensRaw;
+        else walletHeldRaw = 0n;
+        return base58Encode(Buffer.from(params[0], 'base64').subarray(1, 65));
+      }
+      if (method === 'getSignatureStatuses') return { value: [{ confirmationStatus: 'confirmed', err: null }] };
+      if (method === 'getTransaction') return null;
+      if (method === 'getTokenAccountsByOwner') {
+        return {
+          value: walletHeldRaw > 0n
+            ? [{ account: { data: { parsed: { info: { mint: MINT, tokenAmount: { amount: String(walletHeldRaw), decimals: 6 } } } } } }]
+            : [],
+        };
+      }
+      return { value: null };
+    },
+  });
+  trader.routeSetting = () => 'direct';
+  trader.balance = { sol: 5, usdc: 0, at: Date.now() };
+  await trader.refreshBlockhash();
+
+  const tok = {
+    address: MINT,
+    symbol: 'MOOHAN',
+    decimals: 6,
+    venue: 'pumpfun',
+    stage: 'pre-grad',
+    currentPriceUsd: 0.000006,
+    curve: {
+      virtualSolReserves: 30_000_000_000,
+      virtualTokenReserves: 1_073_000_000_000_000,
+      realTokenReserves: 790_000_000_000_000,
+      mayhem: false,
+      cashback: false,
+      tokenProgram: PD.TOKEN_2022_PROGRAM,
+      at: Date.now(),
+    },
+  };
+
+  const qBuy = await trader.quote({ side: 'buy', token: tok, amountUsd: 8, slippagePct: 25 });
+  assert.ok(qBuy._direct.tokensOut > 1_400_000_000_000n, 'pre-trade quote estimates >1.4M tokens');
+
+  const buyRes = await trader.execute({ side: 'buy', token: tok, amountUsd: 8, quote: qBuy, slippagePct: 25 });
+  assert.equal(buyRes.ok, true);
+  assert.ok(Math.abs(buyRes.tokensReceived - 1_124_765.256268) < 1e-4, `booked actual on-chain tokens (1,124,765.26), got ${buyRes.tokensReceived}`);
+  assert.equal(trader.mintMetaCache.get(MINT).heldRaw, actualOnChainTokensRaw, 'mintMetaCache heldRaw matches exact on-chain balance');
+  assert.ok(Math.abs(buyRes.fillPriceUsd - buyRes.spentUsd / 1_124_765.256268) < 1e-9, 'fillPriceUsd reflects true on-chain entry price');
+
+  const qSell = await trader.quote({ side: 'sell', token: tok, amountUsd: 8, slippagePct: 15, tokenAmount: 'all' });
+  assert.equal(qSell.route, 'direct');
+  assert.equal(qSell._direct.amount, actualOnChainTokensRaw, 'direct sell uses exact on-chain token count');
+});

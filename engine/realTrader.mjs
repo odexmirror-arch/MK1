@@ -906,7 +906,7 @@ export class RealTrader {
       !token.curve.cashback &&
       (side === 'buy'
         ? Number(token.curve.realTokenReserves) > 0 && (token.curve.tokenProgram === PD.TOKEN_PROGRAM || token.curve.tokenProgram === PD.TOKEN_2022_PROGRAM) && Number(this.balance?.sol) > 0
-        : cachedMeta && cachedMeta.heldRaw > 0n && !activeBuying && (token.curve.tokenProgram === PD.TOKEN_PROGRAM || token.curve.tokenProgram === PD.TOKEN_2022_PROGRAM || cachedMeta.tokenProgram))
+        : cachedMeta && cachedMeta.heldRaw > 0n && !cachedMeta.estimated && !activeBuying && (token.curve.tokenProgram === PD.TOKEN_PROGRAM || token.curve.tokenProgram === PD.TOKEN_2022_PROGRAM || cachedMeta.tokenProgram))
         ? token.curve
         : null;
     let curve;
@@ -940,6 +940,9 @@ export class RealTrader {
       curve = PD.decodeCurve(curveAcc.data?.[0]);
       const blocker = PD.directBlocker(curve);
       if (blocker) {
+        if (side === 'buy' && blocker === 'curve is not priced in SOL') {
+          throw Object.assign(new Error('curve is not priced in SOL (token-paired curve skipped)'), { skipBuy: true });
+        }
         this.noteFallback(blocker);
         return null;
       }
@@ -1151,19 +1154,16 @@ export class RealTrader {
         }
       }
       const code = PD.customErrorCode(errObj);
+      if (code === 6023 && side === 'sell') this.mintMetaCache?.delete(mint);
       if (PRICE_CODES.has(code)) return { priceMoved: true, error: `pump.fun refused: price moved past the limit while sending (${code})`, signature: sig };
       return { fallback: true, sentFailed: true, signature: sig, error: `direct swap failed on-chain${code !== null ? ` (${code})` : ''}` };
     }
     this.directStats.direct += 1;
     this.directStats.lastDirectAt = this.now();
     if (!this.mintMetaCache) this.mintMetaCache = new Map();
-    if (side === 'buy') {
-      const prev = this.mintMetaCache.get(mint)?.heldRaw || d.preTokens || 0n;
-      this.mintMetaCache.set(mint, { tokenProgram: d.baseTokenProgram, heldRaw: prev + BigInt(outAmount || 0n) });
-    } else {
-      const prev = this.mintMetaCache.get(mint)?.heldRaw || d.preTokens || 0n;
-      const rem = prev > BigInt(inAmount || 0n) ? prev - BigInt(inAmount || 0n) : 0n;
-      this.mintMetaCache.set(mint, { tokenProgram: d.baseTokenProgram, heldRaw: rem });
+    const prevMeta = this.mintMetaCache.get(mint);
+    if (d.baseTokenProgram && !prevMeta?.tokenProgram) {
+      this.mintMetaCache.set(mint, { ...(prevMeta || {}), tokenProgram: d.baseTokenProgram });
     }
     // exact amounts from the simulation as a fallback; readFill prefers the real transaction
     const exec = { totalInputAmount: String(inAmount), totalOutputAmount: String(outAmount), networkLamports: 5000 + priorityLamports + Number(tipLamports) };
@@ -1290,7 +1290,7 @@ export class RealTrader {
       if (since && x.blockTime && x.blockTime * 1000 < since - 60_000) continue;
       let tx;
       try {
-        tx = await this.rpc('getTransaction', [x.signature, { encoding: 'jsonParsed', maxSupportedTransactionVersion: 1, commitment: 'confirmed' }]);
+        tx = await this.rpc('getTransaction', [x.signature, { encoding: 'jsonParsed', maxSupportedTransactionVersion: 0, commitment: 'confirmed' }]);
       } catch {
         continue;
       }
@@ -1678,11 +1678,12 @@ export class RealTrader {
         mint,
         quoteMint,
         exec: exec || (order?.outAmount ? { totalInputAmount: String(order.inAmount), totalOutputAmount: String(order.outAmount) } : null),
-        exactExec: Boolean(exec),
+        exactExec: Boolean(exec && timing?.route !== 'direct'),
         order,
         tokDec,
         newTokenAccount,
         fastCurve: Boolean(quote?._direct?.fastCurve),
+        preTokens: quote?._direct?.preTokens ?? null,
       });
     } catch (err) {
       // The swap DID land: never report it as failed (that would leave untracked tokens in the
@@ -1703,18 +1704,20 @@ export class RealTrader {
       }
       fill = { inputRaw, outputRaw, inputFeeRaw: 0n, outputFeeRaw: 0n, networkLamports: 5000, tokDec: dec, estimated: true };
     }
-    if (timing?.route !== 'direct') {
+    {
       if (!this.mintMetaCache) this.mintMetaCache = new Map();
       const prevMeta = this.mintMetaCache.get(mint);
-      const tokenProgram = prevMeta?.tokenProgram || token?.curve?.tokenProgram || null;
-      if (side === 'buy') {
-        const prevHeld = prevMeta?.heldRaw || 0n;
-        this.mintMetaCache.set(mint, { ...(tokenProgram ? { tokenProgram } : {}), heldRaw: prevHeld + BigInt(fill.outputRaw || 0n) });
+      const tokenProgram = prevMeta?.tokenProgram || quote?._direct?.baseTokenProgram || token?.curve?.tokenProgram || null;
+      if (fill.postTokenRaw !== undefined && fill.postTokenRaw !== null) {
+        this.mintMetaCache.set(mint, { ...(tokenProgram ? { tokenProgram } : {}), heldRaw: BigInt(fill.postTokenRaw), estimated: false });
+      } else if (side === 'buy') {
+        const prevHeld = prevMeta?.heldRaw ?? quote?._direct?.preTokens ?? 0n;
+        this.mintMetaCache.set(mint, { ...(tokenProgram ? { tokenProgram } : {}), heldRaw: prevHeld + BigInt(fill.outputRaw || 0n), estimated: Boolean(fill.estimated) });
       } else {
-        const prevHeld = prevMeta?.heldRaw || 0n;
+        const prevHeld = prevMeta?.heldRaw ?? quote?._direct?.preTokens ?? 0n;
         const soldRaw = BigInt(fill.inputRaw || 0n);
         const rem = prevHeld > soldRaw ? prevHeld - soldRaw : 0n;
-        this.mintMetaCache.set(mint, { ...(tokenProgram ? { tokenProgram } : {}), heldRaw: rem });
+        this.mintMetaCache.set(mint, { ...(tokenProgram ? { tokenProgram } : {}), heldRaw: rem, estimated: Boolean(fill.estimated) });
       }
     }
     const quoteUsd = (raw) => (quoteMint === WSOL_MINT ? (Number(raw) / LAMPORTS) * px : Number(raw) / 1e6);
@@ -1846,7 +1849,7 @@ export class RealTrader {
    * Exact amounts: Jupiter's execute result where present, the on-chain transaction for the
    * network fee (fee + priority + new token-account rent).
    */
-  async readFill({ signature, side, mint, quoteMint, exec, exactExec = true, order, tokDec, newTokenAccount = false, fastCurve = false }) {
+  async readFill({ signature, side, mint, quoteMint, exec, exactExec = true, order, tokDec, newTokenAccount = false, fastCurve = false, preTokens = null }) {
     const big = (v) => {
       try {
         return v === undefined || v === null || v === '' ? null : BigInt(String(v));
@@ -1860,17 +1863,17 @@ export class RealTrader {
     const outputFeeRaw = big(exec?.outputAmountResult) !== null && big(exec?.totalOutputAmount) !== null ? big(exec.outputAmountResult) - big(exec.totalOutputAmount) : 0n;
     let networkLamports = Number.isFinite(Number(exec?.networkLamports)) && Number(exec.networkLamports) >= 5000 ? Number(exec.networkLamports) : 5000;
     let decimals = tokDec;
+    let postTokenRaw = null;
     const cachedOwn = this.ownTxCache?.get(signature);
     let tx = cachedOwn && this.now() - cachedOwn.at < 120_000 ? cachedOwn.tx : null;
-    // When Jupiter /execute or Direct simulation already gave exact input & output amounts, never sleep
-    // waiting on getTransaction indexing: check ownTxCache (0 ms) or try once immediately (0 sleep).
-    // On fastCurve direct swaps where simulation already computed exact amounts, book in 0 ms without blocking on getTransaction.
+    // When Jupiter /execute already gave exact post-execution amounts (exactExec=true), try once with 0 sleep.
+    // Direct swaps only have pre-send simulated/quoted amounts (exactExec=false), so always read the real on-chain fill.
     const haveExecAmounts = inputRaw !== null && outputRaw !== null;
-    const maxTries = tx || (fastCurve && haveExecAmounts) ? 0 : exactExec && haveExecAmounts ? 1 : haveExecAmounts ? 2 : 6;
+    const maxTries = tx ? 0 : exactExec && haveExecAmounts ? 1 : haveExecAmounts ? 2 : 6;
     const waitMs = haveExecAmounts ? 45 : 200;
     for (let i = 0; i < maxTries && !tx; i++) {
       try {
-        tx = await this.rpc('getTransaction', [signature, { encoding: 'jsonParsed', maxSupportedTransactionVersion: 1, commitment: 'confirmed' }]);
+        tx = await this.rpc('getTransaction', [signature, { encoding: 'jsonParsed', maxSupportedTransactionVersion: 0, commitment: 'confirmed' }]);
       } catch {
         tx = null;
       }
@@ -1890,6 +1893,8 @@ export class RealTrader {
       }
       const me = keys.indexOf(this.address);
       const solDelta = me >= 0 ? BigInt(tx.meta.postBalances[me]) - BigInt(tx.meta.preBalances[me]) : null; // lamports
+      let postMintRaw = 0n;
+      let sawMintPost = false;
       const tokDelta = (m) => {
         let pre = 0n;
         let post = 0n;
@@ -1900,10 +1905,13 @@ export class RealTrader {
         for (const b of tx.meta.postTokenBalances || []) if (b.owner === this.address && b.mint === m) {
           post += BigInt(b.uiTokenAmount.amount);
           decimals = m === mint ? b.uiTokenAmount.decimals : decimals;
+          if (m === mint) sawMintPost = true;
         }
+        if (m === mint) postMintRaw = post;
         return post - pre;
       };
       const tDelta = tokDelta(mint);
+      if (sawMintPost || (side === 'sell' && tDelta < 0n)) postTokenRaw = postMintRaw;
       if (side === 'buy') {
         if (tDelta > 0n) outputRaw = tDelta;
         if (quoteMint === WSOL_MINT && solDelta !== null) {
@@ -1914,15 +1922,31 @@ export class RealTrader {
       } else {
         if (tDelta < 0n) inputRaw = -tDelta;
         if (quoteMint === WSOL_MINT && solDelta !== null) {
-          if (outputRaw === null) outputRaw = solDelta + BigInt(tx.meta.fee || 5000);
+          if (outputRaw === null || (!exactExec && solDelta > 0n)) outputRaw = solDelta + BigInt(tx.meta.fee || 5000);
           networkLamports = Number(outputRaw - solDelta);
         } else networkLamports = Number(tx.meta.fee || 5000);
       }
       if (!(networkLamports >= 0)) networkLamports = Number(tx.meta.fee || 5000);
+    } else if (!exactExec) {
+      // getTransaction not indexed yet: read live token balance directly from AccountsDB (0 ms indexing lag)
+      const pre = preTokens !== null && preTokens !== undefined ? BigInt(preTokens) : 0n;
+      if (side === 'buy') {
+        const liveHeld = await this.getTokenBalanceRaw(mint).catch(() => 0n);
+        if (liveHeld > pre) {
+          outputRaw = liveHeld - pre;
+          postTokenRaw = liveHeld;
+        }
+      } else {
+        const liveHeld = await this.getTokenBalanceRaw(mint).catch(() => null);
+        if (liveHeld !== null) {
+          postTokenRaw = liveHeld;
+          if (pre > liveHeld) inputRaw = pre - liveHeld;
+        }
+      }
     }
     if (decimals === null || decimals === undefined) decimals = await this.getDecimals(mint);
     if (inputRaw === null || outputRaw === null) throw new Error('swap landed but amounts could not be read');
-    return { inputRaw, outputRaw, inputFeeRaw: inputFeeRaw > 0n ? inputFeeRaw : 0n, outputFeeRaw: outputFeeRaw > 0n ? outputFeeRaw : 0n, networkLamports, tokDec: decimals };
+    return { inputRaw, outputRaw, inputFeeRaw: inputFeeRaw > 0n ? inputFeeRaw : 0n, outputFeeRaw: outputFeeRaw > 0n ? outputFeeRaw : 0n, networkLamports, tokDec: decimals, postTokenRaw };
   }
 
   /**
