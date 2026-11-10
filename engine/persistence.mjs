@@ -62,24 +62,6 @@ export function restoreEngine(engine, data) {
         f.decuV4Migrated = true;
         f.decuV5Migrated = true;
       }
-      if ((f.id === 'fol-03782071' || f.traderWallet === '4vw54BmAogeRV3vPKWyFet5yf8DTLcREzdSzx4rw9Ud9') && !f.decuV6Migrated) {
-        f.mode = 'auto-exit';
-        f.mirrorSells = true;
-        const baseRules = followTraderExitRules();
-        f.exitRules = {
-          ...baseRules,
-          takeInitials: { ...baseRules.takeInitials, enabled: true, takeAtPct: 45, sellSizePct: 100 },
-          moonbagTrail: { ...baseRules.moonbagTrail, enabled: true, trailPct: 10, armsAtPct: 12 },
-          floor: { ...baseRules.floor, enabled: true, openingFloorPct: 32, tightensAfterSec: 20, tightFloorPct: 18 },
-          waveCut: { ...baseRules.waveCut, enabled: true, afterSec: 25, needsPeakPct: 3 },
-          hardTimeCap: { ...baseRules.hardTimeCap, enabled: true, timeCapSec: 300 },
-        };
-        f.copyTopUps = false;
-        f.reentryCooldownMin = 10;
-        f.maxChasePct = 35;
-        f.filtersOverride = { ...(f.filtersOverride || {}), minTraderBuyNative: 0.5 };
-        f.decuV6Migrated = true;
-      }
     }
   }
   if (Array.isArray(data.positions)) engine.positions = data.positions;
@@ -114,11 +96,6 @@ export function restoreEngine(engine, data) {
         mainWallet.paperBalanceUsd = 400;
       }
       merged.decuV4SettingsMigrated = true;
-    }
-    if (hasDecu && !merged.decuV6SettingsMigrated) {
-      merged.maxChasePct = 35;
-      merged.buySlippagePct = { ...(merged.buySlippagePct || {}), solana: 20 };
-      merged.decuV6SettingsMigrated = true;
     }
     engine.settings = merged;
   }
