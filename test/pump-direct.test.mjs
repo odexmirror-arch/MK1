@@ -587,7 +587,7 @@ test('PD23 Turbo direct buy with Jito endpoint attaches atomic SystemProgram.tra
   trader.priorityMicroLamports = (units, side, tradeSol) => {
     const tip = trader.jitoTipLamports(side, tradeSol);
     const full = priorityMicroLamportsFor(pf, units, null, { tradeSol });
-    return tip >= 1_000 ? Math.max(1_000_000, Math.round(full * 0.45)) : full;
+    return full;
   };
   const origFetch = trader.fetch;
   trader.fetch = async (url, opts) => {

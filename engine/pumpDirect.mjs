@@ -187,12 +187,12 @@ export function resolveDirectPriority({
 
   if (mode === 'turbo') {
     if (canTip) {
-      microLamports = Math.max(floorMicro, 7_500_000); // ~0.00086 SOL on 115k CU
+      microLamports = Math.max(floorMicro, 15_000_000); // full CU priority alongside Jito tip
       jitoTipLamports = 1_500_000; // 0.0015 SOL Jito tip (atomic: 0 SOL paid if swap reverts)
     } else if (side === 'buy') {
       microLamports = Math.max(floorMicro, 15_000_000); // ~0.00173 SOL on 115k CU
     } else {
-      microLamports = Math.max(floorMicro, 7_500_000); // ~0.00068 SOL on 90k CU sell
+      microLamports = Math.max(floorMicro, 15_000_000); // full priority on sell too
     }
   } else if (mode === 'fast') {
     if (canTip) {
@@ -201,7 +201,7 @@ export function resolveDirectPriority({
     } else if (side === 'buy') {
       microLamports = Math.max(floorMicro, Math.round((1_000_000 * 1_000_000) / cu)); // ~0.001 SOL
     } else {
-      microLamports = Math.max(floorMicro, 4_000_000); // ~0.00036 SOL on 90k CU sell
+      microLamports = Math.max(floorMicro, Math.round((1_000_000 * 1_000_000) / cu)); // full priority on sell too
     }
   } else if (mode === 'custom') {
     const customSol = Math.min(0.02, Math.max(0.0001, Number(priorityFee.customSol) || 0.002));

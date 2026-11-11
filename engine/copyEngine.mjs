@@ -1261,7 +1261,7 @@ export class CopyTradingEngine {
     if (!pos || pos.remainingTokens <= 0) {
       return { ok: false, error: 'Position not found or already closed.' };
     }
-    if (traderSellCurve) pos.lastCurve = traderSellCurve;
+    if (traderSellCurve) pos.lastCurve = traderSellCurve.at ? traderSellCurve : { ...traderSellCurve, at: Date.now() };
 
     const wallet = this.getWalletById(pos.walletId);
     const chain = CHAINS[pos.chainId];
@@ -1332,7 +1332,7 @@ export class CopyTradingEngine {
       if (sc?.fillPriceUsd > 0) paperSellFillPriceUsd = sc.fillPriceUsd;
     }
     const freshPosCurve = pos.lastCurve && (!pos.lastCurve.at || Date.now() - Number(pos.lastCurve.at) < 2000) ? pos.lastCurve : null;
-    const sellCurve = traderSellCurve || freshPosCurve;
+    const sellCurve = (traderSellCurve ? pos.lastCurve : null) || freshPosCurve;
     let quote;
     try {
       quote = await this.adapter.getSwapQuote({

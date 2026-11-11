@@ -849,25 +849,25 @@ function renderTerminalAll() {
 // "How the engine works" page: the six copy steps, exit rules and protections with live values
 // ---------------------------------------------------------------------------
 const DOC_ICONS = {
-  watch: '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>',
-  filter: '<polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/>',
-  size: '<line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/>',
-  verify: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9 12 11 14 15 10"/>',
-  execute: '<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>',
+  watch: '<path fill="currentColor" d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zm0 12a4.5 4.5 0 1 1 0-9 4.5 4.5 0 0 1 0 9zm0-7a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5z"/>',
+  filter: '<path fill="currentColor" d="M3 4.5A1.5 1.5 0 0 1 4.5 3h15a1.5 1.5 0 0 1 1.15 2.46L14 13.44V19.5a1.5 1.5 0 0 1-2.17 1.34l-2-1A1.5 1.5 0 0 1 9 18.5v-5.06L2.35 5.46A1.5 1.5 0 0 1 3 4.5z"/>',
+  size: '<path fill="currentColor" d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm1 14.93V18a1 1 0 1 1-2 0v-1.08A4.01 4.01 0 0 1 8 13a1 1 0 1 1 2 0c0 1.1.9 2 2 2s2-.9 2-2c0-1.04-.8-1.64-2.35-2.06C9.58 10.38 8 9.35 8 7a4 4 0 0 1 3-3.87V2a1 1 0 1 1 2 0v1.08A4 4 0 0 1 16 7a1 1 0 1 1-2 0c0-1.1-.9-2-2-2s-2 .9-2 2c0 .99.78 1.54 2.35 1.97C14.42 9.53 16 10.58 16 13a4 4 0 0 1-3 3.93z"/>',
+  verify: '<path fill="currentColor" d="M12 2L4 5.5v6.09c0 5.05 3.41 9.76 8 10.91 4.59-1.15 8-5.86 8-10.91V5.5L12 2zm-1.1 13.6l-3.5-3.5 1.41-1.41 2.09 2.09 4.59-4.59 1.41 1.41-6 6z"/>',
+  execute: '<polygon fill="currentColor" points="13 2 4 14 12 14 11 22 20 10 12 10 13 2"/>',
   exit: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/>',
   initials: '<polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/>',
   trail: '<path d="M3 17l6-6 4 4 8-8"/><path d="M14 7h7v7"/>',
   floor: '<line x1="3" y1="20" x2="21" y2="20"/><polyline points="3 6 9 12 13 9 21 16"/>',
   wave: '<path d="M2 12c2-3 4-3 6 0s4 3 6 0 4-3 6 0"/>',
-  clock: '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
-  shield: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>',
-  lock: '<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
-  pause: '<rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/>',
-  cap: '<circle cx="12" cy="12" r="10"/><line x1="4.9" y1="4.9" x2="19.1" y2="19.1"/>',
-  one: '<rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>',
-  radar: '<circle cx="12" cy="12" r="2"/><path d="M16.24 7.76a6 6 0 0 1 0 8.49M7.76 16.24a6 6 0 0 1 0-8.49M19.07 4.93a10 10 0 0 1 0 14.14M4.93 19.07a10 10 0 0 1 0-14.14"/>',
+  clock: '<path fill="currentColor" d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm1 10.41l3.29 1.9a1 1 0 0 1-1 1.73l-3.79-2.19A1 1 0 0 1 11 13V7a1 1 0 1 1 2 0v5.41z"/>',
+  shield: '<path fill="currentColor" d="M12 2L4 5.5v6.09c0 5.05 3.41 9.76 8 10.91 4.59-1.15 8-5.86 8-10.91V5.5L12 2z"/>',
+  lock: '<path fill="currentColor" d="M17 10V7a5 5 0 0 0-10 0v3H6a2 2 0 0 0-2 2v7.5A2.5 2.5 0 0 0 6.5 22h11a2.5 2.5 0 0 0 2.5-2.5V12a2 2 0 0 0-2-2h-1zm-7-3a2 2 0 1 1 4 0v3h-4V7z"/>',
+  pause: '<rect fill="currentColor" x="5.5" y="4" width="4.5" height="16" rx="1.5"/><rect fill="currentColor" x="14" y="4" width="4.5" height="16" rx="1.5"/>',
+  cap: '<path fill="currentColor" d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm5.66 14.24a1 1 0 0 1-1.42 1.42L6.34 7.76a1 1 0 1 1 1.42-1.42l9.9 9.9z"/>',
+  one: '<path fill="currentColor" d="M4 3h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-7v2h3a1 1 0 1 1 0 2H8a1 1 0 1 1 0-2h3v-2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/>',
+  radar: '<circle fill="currentColor" cx="12" cy="12" r="2.6"/><path d="M16.24 7.76a6 6 0 0 1 0 8.49M7.76 16.24a6 6 0 0 1 0-8.49M19.07 4.93a10 10 0 0 1 0 14.14M4.93 19.07a10 10 0 0 1 0-14.14"/>',
 };
-const docIcon = (k, size = 18) => `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${DOC_ICONS[k] || ''}</svg>`;
+const docIcon = (k, size = 18) => `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${DOC_ICONS[k] || ''}</svg>`;
 
 function renderDocsView() {
   const root = document.getElementById('docs-live');
@@ -1385,7 +1385,7 @@ function renderKpiStrip() {
   const folSum = document.getElementById('follows-header-summary');
   if (folSum) folSum.textContent = `${totalFollows} trader${totalFollows === 1 ? '' : 's'} · ${copyingFollows} copying`;
   const cfgFol = document.querySelector('.cfg-nav-btn[data-cfg="copytrades"] small');
-  if (cfgFol) cfgFol.textContent = totalFollows ? `${totalFollows} trader${totalFollows === 1 ? '' : 's'} · ${copyingFollows} copying` : 'Traders you copy & exit rules';
+  if (cfgFol) cfgFol.textContent = `${totalFollows} trader${totalFollows === 1 ? '' : 's'} · ${copyingFollows} copying`;
   const pumpBtn = document.getElementById('btn-toggle-pump-only');
   if (pumpBtn) {
     pumpBtn.textContent = `Pump-Only: ${pumpOn ? 'ON' : 'OFF'}`;
@@ -4440,10 +4440,77 @@ function fillUiForms() {
   if (ph) {
     const a = phantomAddress();
     ph.innerHTML = a
-      ? `<span class="mono" title="${esc(a)}">${esc(shortAddr(a, 6, 6))}</span><a class="btn btn-sm" href="https://solscan.io/account/${encodeURIComponent(a)}" target="_blank" rel="noopener">Solscan</a><button class="btn btn-sm" onclick="disconnectPhantom().then(fillUiForms)">Disconnect</button>`
-      : `<span class="muted">Not linked</span><button class="btn btn-sm" onclick="connectPhantom().then(fillUiForms)">Connect Phantom</button>`;
+      ? `<span class="mono" title="${esc(a)}">${esc(shortAddr(a, 6, 6))}</span><div style="display:inline-flex;gap:6px;"><a class="btn btn-sm" href="https://solscan.io/account/${encodeURIComponent(a)}" target="_blank" rel="noopener">Solscan</a><button type="button" class="btn btn-sm" onclick="disconnectPhantom().then(fillUiForms)">Disconnect</button></div>`
+      : `<span class="muted">Not linked</span><button type="button" class="btn btn-sm" onclick="connectPhantom().then(fillUiForms)">Connect Phantom</button>`;
+  }
+  syncProfileAvatarUi();
+}
+
+function syncProfileAvatarUi() {
+  let photo = '';
+  try {
+    photo = localStorage.getItem('odex.profilePhoto') || '';
+  } catch {
+    photo = '';
+  }
+  const img = document.getElementById('profile-avatar-img');
+  const svg = document.getElementById('profile-avatar-svg');
+  if (img && svg) {
+    if (photo) {
+      img.src = photo;
+      img.hidden = false;
+      svg.style.display = 'none';
+    } else {
+      img.removeAttribute('src');
+      img.hidden = true;
+      svg.style.display = '';
+    }
+  }
+  const btn = document.querySelector('.header-user-btn');
+  if (btn) {
+    let hImg = btn.querySelector('.hub-photo');
+    if (photo) {
+      if (!hImg) {
+        hImg = document.createElement('img');
+        hImg.className = 'hub-photo';
+        hImg.alt = 'Profile';
+        btn.appendChild(hImg);
+      }
+      if (hImg.getAttribute('src') !== photo) hImg.src = photo;
+      btn.classList.add('has-photo');
+    } else {
+      if (hImg) hImg.remove();
+      btn.classList.remove('has-photo');
+    }
   }
 }
+
+window.handleProfilePhotoUpload = function handleProfilePhotoUpload(input) {
+  const file = input?.files?.[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      localStorage.setItem('odex.profilePhoto', String(reader.result || ''));
+      syncProfileAvatarUi();
+      showToast('Profile photo updated.', 'good');
+    } catch {
+      showToast('Image is too large to store locally.', 'warn');
+    }
+  };
+  reader.readAsDataURL(file);
+  input.value = '';
+};
+
+window.removeProfilePhoto = function removeProfilePhoto() {
+  try {
+    localStorage.removeItem('odex.profilePhoto');
+  } catch {
+    // ignore
+  }
+  syncProfileAvatarUi();
+  showToast('Profile photo removed.', 'good');
+};
 
 window.saveUiSettings = async function saveUiSettings(group) {
   const ui = {};
@@ -4491,6 +4558,7 @@ function applyUiSettings() {
       btn.classList.remove('has-initial');
     }
   }
+  syncProfileAvatarUi();
   const acct = document.getElementById('acct-name');
   if (acct) acct.textContent = name || 'Odex Mirror';
   if (!landingApplied) {

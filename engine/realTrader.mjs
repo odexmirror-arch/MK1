@@ -45,7 +45,14 @@ export function priorityMicroLamportsFor(priorityFee, cuUnits = 100_000, envOver
   }
   const sz = Number(tradeSol);
   if (Number.isFinite(sz) && sz > 0 && (priorityFee.mode === 'fast' || priorityFee.mode === 'turbo')) {
-    const sizeCap = priorityFee.mode === 'turbo' ? Math.max(0.00035, sz * 0.004) : Math.max(0.00025, sz * 0.003);
+    const sizeCap =
+      sz < 0.15
+        ? priorityFee.mode === 'turbo'
+          ? Math.max(0.00035, sz * 0.004)
+          : Math.max(0.00025, sz * 0.003)
+        : priorityFee.mode === 'turbo'
+          ? Math.max(0.0025, sz * 0.008)
+          : Math.max(0.001, sz * 0.005);
     targetSol = Math.min(targetSol, sizeCap);
   }
   const units = Math.max(20_000, Number(cuUnits) || 100_000);
@@ -201,7 +208,7 @@ export class RealTrader {
       maxSolPerTrade: num(env.ODEX_REAL_MAX_SOL_PER_TRADE, 0.5),
       maxSolPerDay: num(env.ODEX_REAL_MAX_SOL_PER_DAY, 2), // 0 = no daily cap
       reserveSol: num(env.ODEX_REAL_RESERVE_SOL, 0.02), // kept for fees + token-account rent
-      sellRetrySec: num(env.ODEX_REAL_SELL_RETRY_SEC, 3), // exits retry fast: a falling coin can't wait
+      sellRetrySec: num(env.ODEX_REAL_SELL_RETRY_SEC, 0.4), // exits retry fast (1 Solana slot): a falling coin can't wait 3s
     };
     this.capsOverride = () => null;
     const self = this;
@@ -905,7 +912,7 @@ export class RealTrader {
       !token.curve.mayhem &&
       !token.curve.cashback &&
       (side === 'buy'
-        ? Number(token.curve.realTokenReserves) > 0 && (token.curve.tokenProgram === PD.TOKEN_PROGRAM || token.curve.tokenProgram === PD.TOKEN_2022_PROGRAM) && Number(this.balance?.sol) > 0
+        ? Number(token.curve.realTokenReserves) > 0 && (token.curve.tokenProgram === PD.TOKEN_PROGRAM || token.curve.tokenProgram === PD.TOKEN_2022_PROGRAM || cachedMeta?.tokenProgram) && Number(this.balance?.sol) > 0
         : cachedMeta && cachedMeta.heldRaw > 0n && !cachedMeta.estimated && !activeBuying && (token.curve.tokenProgram === PD.TOKEN_PROGRAM || token.curve.tokenProgram === PD.TOKEN_2022_PROGRAM || cachedMeta.tokenProgram))
         ? token.curve
         : null;
@@ -956,6 +963,9 @@ export class RealTrader {
       preTokens = ataAcc ? PD.tokenAccountAmount(ataAcc.data?.[0]) : 0n;
       ataExists = Boolean(ataAcc);
       preLamports = BigInt(userAcc?.lamports || 0);
+      if (!this.balance && preLamports > 0n) {
+        this.balance = { sol: Number(preLamports) / LAMPORTS, usdc: 0, at: this.now() };
+      }
       blockhash = await bhP;
     }
     const tokDec = Number.isInteger(token?.decimals) ? token.decimals : this.decimals.get(mint) ?? 6;

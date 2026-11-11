@@ -221,6 +221,9 @@ export function parseSwapFromTransaction(tx, wallet) {
   // price from the pool leg (excludes fees, tips and deposits); SOL-quoted trades only
   const swapVenue = keys.includes(PUMP_CURVE_PROGRAM) ? 'pumpfun' : keys.includes(PUMP_AMM_PROGRAM) ? 'pumpswap' : keys.includes(RAYDIUM_LAUNCHLAB_PROGRAM) ? 'launchlab' : null;
   const llEv = swapVenue === 'launchlab' && Array.isArray(meta.logMessages) ? launchLabTradeFromLogs(meta.logMessages) : null;
+  const pumpLogRes = swapVenue === 'pumpfun' && Array.isArray(meta.logMessages) ? pumpTradeFromLogs(meta.logMessages, wallet) : null;
+  const pumpEv = pumpLogRes?.trade && pumpLogRes.trade.mint === tok.mint ? pumpLogRes.trade : null;
+  const txTokenProg = keys.includes(TOKEN_2022_PROGRAM) ? TOKEN_2022_PROGRAM : keys.includes(TOKEN_PROGRAM) ? TOKEN_PROGRAM : null;
   const llSol = llEv && llEv.poolSolLamports > 0 ? llEv.poolSolLamports / LAMPORTS_PER_SOL : null;
   const poolQuote =
     quote.symbol === 'SOL'
@@ -258,7 +261,18 @@ export function parseSwapFromTransaction(tx, wallet) {
             realTokenReserves: llEv.realTokenReserves,
             launchlab: true,
           }
-        : undefined,
+        : pumpEv && pumpEv.virtualSolReserves > 0n && pumpEv.virtualTokenReserves > 0n
+          ? {
+              virtualSolReserves: Number(pumpEv.virtualSolReserves),
+              virtualTokenReserves: Number(pumpEv.virtualTokenReserves),
+              realSolReserves: Number(pumpEv.realSolReserves || 0n),
+              realTokenReserves: Number(pumpEv.realTokenReserves || 0n),
+              mayhem: Boolean(pumpEv.mayhem),
+              cashback: Boolean(pumpEv.cashback),
+              tokenProgram: pumpEv.tokenProgram || txTokenProg,
+              at: Date.now(),
+            }
+          : undefined,
   };
 }
 
@@ -1377,6 +1391,7 @@ export class SolanaWalletWatcher {
               cashback: Boolean(swap.curve.cashback),
               launchlab: Boolean(swap.curve.launchlab),
               tokenProgram: swap.curve.tokenProgram || null,
+              at: swap.curve.at || Date.now(),
             }
           : null,
       signature: sig,

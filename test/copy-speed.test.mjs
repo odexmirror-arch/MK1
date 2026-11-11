@@ -951,3 +951,119 @@ test('S20 fastCurve direct buy reads actual post-land tokens (not pre-trade simu
   assert.equal(qSell.route, 'direct');
   assert.equal(qSell._direct.amount, actualOnChainTokensRaw, 'direct sell uses exact on-chain token count');
 });
+
+test('S21 Edit A + Edit B + Items #1–#4: parseSwapFromTransaction curve extraction, 0ms fastCurve mirror sell, 0.4s sellRetrySec, and full Turbo CU priority on $25 buys & sells', async () => {
+  const { parseSwapFromTransaction } = await import('../engine/walletWatcher.mjs');
+  const { base58Decode } = await import('../engine/onchainMeta.mjs');
+  const MINT = '82ysZZ4WrTkeo8Tz6o5QiVtJYqs6FCu6WX73GCEJpump';
+  const u64 = (v) => {
+    const b = Buffer.alloc(8);
+    b.writeBigUInt64LE(BigInt(v));
+    return b;
+  };
+  const pk = (s) => Buffer.from(base58Decode(s));
+  const name = Buffer.from('buy_exact_quote_in_v3');
+  const len = Buffer.alloc(4);
+  len.writeUInt32LE(name.length);
+  const evB64 = Buffer.concat([
+    Buffer.from([189, 219, 127, 211, 78, 230, 97, 238]),
+    pk(MINT), u64(250_000_000n), u64(30_000_000_000_000n), Buffer.from([1]), pk(WALLET), u64(Math.floor(Date.now() / 1000)),
+    u64(32_500_000_000n), u64(990_000_000_000_000n), u64(2_500_000_000n), u64(710_000_000_000_000n),
+    pk('11111111111111111111111111111111'), u64(95), u64(2_500_000n), pk(WALLET), u64(30), u64(750_000n),
+    Buffer.from([1]), u64(0), u64(0), u64(0), u64(0), len, name,
+    Buffer.from([0]), u64(0), u64(0), u64(0), u64(0), Buffer.alloc(4), pk(WSOL_MINT), u64(250_000_000n),
+  ]).toString('base64');
+
+  // 1. Edit A + Item #2: parseSwapFromTransaction extracts curve + Token-2022 + .at timestamp
+  const tx = {
+    slot: 100,
+    blockTime: Math.floor(Date.now() / 1000),
+    meta: {
+      err: null,
+      fee: 5000,
+      preBalances: [5e9, 0, 0, 1],
+      postBalances: [4.75e9 - 5000, 0, 0, 1],
+      preTokenBalances: [],
+      postTokenBalances: [{ accountIndex: 2, mint: MINT, owner: WALLET, uiTokenAmount: { amount: '30000000000000', decimals: 6 } }],
+      logMessages: [`Program ${PUMP_CURVE_PROGRAM} invoke [1]`, `Program data: ${evB64}`, `Program ${PUMP_CURVE_PROGRAM} success`],
+    },
+    transaction: {
+      signatures: ['sig-edit-a'],
+      message: { accountKeys: [{ pubkey: WALLET }, { pubkey: PUMP_CURVE_PROGRAM }, { pubkey: PD.TOKEN_2022_PROGRAM }] },
+    },
+  };
+  const parsed = parseSwapFromTransaction(tx, WALLET);
+  assert.ok(parsed.curve, 'Edit A: curve extracted from parseSwapFromTransaction');
+  assert.equal(parsed.curve.virtualSolReserves, 32_500_000_000);
+  assert.equal(parsed.curve.tokenProgram, PD.TOKEN_2022_PROGRAM, 'Edit A: Token-2022 extracted from tx keys');
+  assert.ok(Date.now() - parsed.curve.at < 1000, 'Item #2: curve.at timestamp stamped');
+
+  // 2. Item #1 & #4: $25 (~0.30 SOL) Turbo buy & sell get full 0.0025 SOL CU priority
+  const buyMicro = priorityMicroLamportsFor({ mode: 'turbo' }, 95_000, null, { tradeSol: 0.30 });
+  const sellMicro = priorityMicroLamportsFor({ mode: 'turbo' }, 65_000, null, { tradeSol: 0.30 });
+  assert.equal(buyMicro, 26_315_789, 'Item #4: $25 buy gets 26.3M microLamports/CU');
+  assert.equal(sellMicro, 38_461_538, 'Item #1: $25 sell gets 38.5M microLamports/CU');
+  const sellPol = PD.resolveDirectPriority({ priorityFee: { mode: 'turbo' }, side: 'sell', units: 65_000 });
+  assert.equal(sellPol.microLamports, 15_000_000, 'Item #1: resolveDirectPriority gives sell full 15M microLamports on turbo');
+
+  // 3. Item #3 + Edit B + Item #2: sellRetrySec = 0.4s & traderSellCurve without .at stamps .at for 0-RPC fastCurve sell
+  const { privateKey, publicKey } = crypto.generateKeyPairSync('ed25519');
+  const secret = base58Encode(Buffer.concat([privateKey.export({ format: 'der', type: 'pkcs8' }).subarray(-32), publicKey.export({ format: 'der', type: 'spki' }).subarray(-32)]));
+  const rpcCalls = [];
+  const trader = new RealTrader({
+    env: { ODEX_TRADER_KEY: secret },
+    solPrice: () => 85,
+    rpc: async (method, params) => {
+      rpcCalls.push(method);
+      if (method === 'getLatestBlockhash') return { value: { blockhash: base58Encode(crypto.randomBytes(32)) } };
+      if (method === 'simulateTransaction') return { value: { err: null, accounts: [{ lamports: 4_700_000_000 }, { data: [Buffer.alloc(165).toString('base64'), 'base64'] }] } };
+      if (method === 'sendTransaction') return base58Encode(Buffer.from(params[0], 'base64').subarray(1, 65));
+      if (method === 'getSignatureStatuses') return { value: [{ confirmationStatus: 'confirmed', err: null }] };
+      if (method === 'getTransaction') return null;
+      if (method === 'getTokenAccountsByOwner') {
+        return { value: [{ account: { data: { parsed: { info: { mint: MINT, tokenAmount: { amount: '3500000000000', decimals: 6 } } } } } }] };
+      }
+      return { value: null };
+    },
+  });
+  assert.equal(trader.caps.sellRetrySec, 0.4, 'Item #3: sellRetrySec defaults to 0.4s');
+  trader.routeSetting = () => 'direct';
+  trader.balance = { sol: 5, usdc: 0, at: Date.now() };
+  await trader.refreshBlockhash();
+
+  const e = new CopyTradingEngine();
+  e.resetToCleanState();
+  e.settings.paperTrading = false;
+  e.settings.tradingAsset.solana = 'native';
+  e.adapter.liveHooks = trader.hooks();
+  e.adapter.realEnabled = () => true;
+  e.getActiveWallet().balances.solana = { native: 5, stable: 0 };
+  const f = {
+    id: 'fol-s21', walletId: e.getActiveWallet().id, name: '4vw5…9Ud9', handle: '4vw5…9Ud9', traderWallet: WALLET, chainId: 'solana',
+    status: 'copying', pauseReason: null, mode: 'auto-exit', mirrorSells: true, sizing: { type: 'fixed', amount: 25 }, maxChasePct: 30,
+    minTradeUsd: 1, maxOpenPositions: 10, maxAtRiskUsd: 1000, consecutiveLosses: 0, exitRules: createDefaultExitRules(), filtersOverride: {}, createdAt: Date.now(),
+  };
+  e.follows.unshift(f);
+
+  rpcCalls.length = 0;
+  const [buyRes] = await e.processTraderSignal({
+    chainId: 'solana', side: 'buy', traderHandle: f.handle, traderWallet: WALLET, traderBuyUsd: 165, signature: 'sig-s21-buy',
+    token: { address: MINT, decimals: 6, symbol: 'DEGEN', name: 'Degen', isLaunchpad: true, venue: 'pumpfun', stage: 'pre-grad', marketCapUsd: 6000, traderFillPriceUsd: 0.000006, currentPriceUsd: 0.000006, curve: parsed.curve, safety: { safetyVerified: true } },
+  });
+  assert.equal(buyRes.status, 'filled');
+  assert.equal(rpcCalls.filter((m) => m === 'getMultipleAccounts').length, 0, '0 getMultipleAccounts RPC calls on buy thanks to Edit A curve + Token-2022');
+
+  // Expire pos.lastCurve.at so only traderSellCurve (passed WITHOUT .at) can save the mirror sell from getMultipleAccounts
+  e.positions[0].lastCurve.at = Date.now() - 10_000;
+  rpcCalls.length = 0;
+  const [sellRes] = await e.processTraderSignal({
+    chainId: 'solana', side: 'sell', sellSharePct: 100, traderHandle: f.handle, traderWallet: WALLET, signature: 'sig-s21-sell',
+    token: {
+      address: MINT, decimals: 6, symbol: 'DEGEN', venue: 'pumpfun', stage: 'pre-grad',
+      traderFillPriceUsd: 0.000008, currentPriceUsd: 0.000008,
+      curve: { virtualSolReserves: 35_000_000_000, virtualTokenReserves: 920_000_000_000_000, realTokenReserves: 640_000_000_000_000, mayhem: false, cashback: false },
+    },
+  });
+  assert.equal(sellRes.ok, true);
+  assert.equal(rpcCalls.filter((m) => m === 'getMultipleAccounts').length, 0, 'Item #2: 0 getMultipleAccounts RPC calls on mirror sell when traderSellCurve is stamped with .at');
+});

@@ -180,7 +180,7 @@ realTrader.jitoTipLamports = (side, tradeSol) =>
 realTrader.priorityMicroLamports = (units, side, tradeSol) => {
   const tipLamports = realTrader.jitoTipLamports(side, tradeSol);
   const fullMicro = priorityMicroLamportsFor(engine.settings.priorityFee, units, process.env.ODEX_DIRECT_PRIORITY_MICROLAMPORTS, { tradeSol });
-  return tipLamports >= 1_000 ? Math.max(1_000_000, Math.round(fullMicro * 0.45)) : fullMicro;
+  return fullMicro;
 };
 realTrader.startBlockhashWarmer();
 realTrader.startConnectionWarmer();
