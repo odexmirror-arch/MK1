@@ -1112,6 +1112,10 @@ export class CopyTradingEngine {
       armedOrders: [],
     };
     this.positions.unshift(position);
+    if (Number(execResult.fillPriceUsd) > 0 && token.address) {
+      if (!this.lastTradePrice) this.lastTradePrice = new Map();
+      this.lastTradePrice.set(token.address, { priceUsd: Number(execResult.fillPriceUsd), at: Date.now() });
+    }
     this.markCopiedCycle(follow.id, token.address);
 
     const receipt = {
@@ -1440,6 +1444,7 @@ export class CopyTradingEngine {
     pos.soldTokens = Number(((pos.soldTokens || 0) + tokensSold).toFixed(6));
     if (pos.investedSol != null && CHAINS.solana?.nativePriceUsd > 0) pos.soldSol = Number(((pos.soldSol || 0) + netProceedsUsd / CHAINS.solana.nativePriceUsd).toFixed(6));
     pos.lastSellAt = Date.now();
+    pos.lastCurve = null;
     // scorecard: our exit vs the trader's own sell price (negative = we sold lower)
     if (traderExitPriceUsd > 0 && execResult.fillPriceUsd > 0) pos.exitSlipPct = Number(((execResult.fillPriceUsd / traderExitPriceUsd - 1) * 100).toFixed(2));
 
@@ -1522,7 +1527,7 @@ export class CopyTradingEngine {
     // Evaluate streak / daily-loss limits only after this sell is in history,
     // so the closing trade's own loss counts toward the 24h limit.
     if (positionClosed) {
-      this.evaluateRiskLimitsOnClose(pos, pnlUsd);
+      this.evaluateRiskLimitsOnClose(pos, pos.realizedPnlUsd);
       this.evaluateTraderScore(pos.followId, Boolean(pos.isPaper));
     }
 

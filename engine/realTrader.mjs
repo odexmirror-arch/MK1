@@ -1077,7 +1077,6 @@ export class RealTrader {
       if (this.sentSigs.has(signed.signature)) return { fallback: true, error: 'identical transaction already sent — not sending it twice' };
       this.sentSigs.set(signed.signature, this.now());
     }
-    const simP = this.rpc('simulateTransaction', [signed.base64, { encoding: 'base64', commitment: 'processed', sigVerify: true, replaceRecentBlockhash: false, accounts: { encoding: 'base64', addresses: [this.address, d.userAta] } }]);
     let fastSent = false;
     let fastSendStart = 0;
     let fastSig = signed.signature;
@@ -1091,6 +1090,7 @@ export class RealTrader {
       // Start signature confirmation micro-polling immediately in parallel with simulation & send
       fastConfirmP = this.waitForSignature(fastSig, 25_000);
     }
+    const simP = this.rpc('simulateTransaction', [signed.base64, { encoding: 'base64', commitment: 'processed', sigVerify: true, replaceRecentBlockhash: false, accounts: { encoding: 'base64', addresses: [this.address, d.userAta] } }]);
     // ----- simulate and check the balance changes -----
     let sim;
     try {
@@ -1119,7 +1119,7 @@ export class RealTrader {
       if (!fastSent && tokDelta < minOut) return { fallback: true, error: `simulation gave ${tokDelta} tokens, under the ${minOut} minimum` };
       if (!d.fastCurve && -solDelta > d.lamportsIn + tipLamports + 6_000_000n) return { fallback: true, error: `simulation spent ${-solDelta} lamports, more than expected` };
       inAmount = d.lamportsIn;
-      outAmount = tokDelta > 0n ? tokDelta : d.tokensOut;
+      outAmount = tokDelta > 0n && (!d.fastCurve || tokDelta <= d.tokensOut) ? tokDelta : d.tokensOut;
     } else {
       if (!fastSent && -tokDelta !== d.amount) return { fallback: true, error: `simulation sold ${-tokDelta} tokens, expected ${d.amount}` };
       if (!fastSent && solDelta < minOut - 200_000n) return { fallback: true, error: `simulation returned ${solDelta} lamports, under the minimum` };
