@@ -21,6 +21,7 @@ export const DEFAULT_EXIT_RULES = {
     openingFloorPct: 45, // Stored as positive drop %: 45 means -45% (Range: 5% to 95%)
     tightensAfterSec: 50, // Range: 1s to 3600s
     tightFloorPct: 20, // Stored as positive drop %: 20 means -20% (Range: 5% to 95%)
+    graceSec: 0, // Optional grace period (e.g. 4s) so 1-2s launch wicks do not false-trigger the opening floor
   },
   waveCut: {
     enabled: false,
@@ -565,9 +566,15 @@ export class CopyTradingEngine {
     return typeof follow?.copyTopUps === 'boolean' ? follow.copyTopUps : Boolean(this.settings.copyTopUps);
   }
 
-  maxChaseFor(follow) {
+  maxChaseFor(follow, token = null) {
     const v = Number(follow?.maxChasePct);
-    return follow?.maxChasePct !== null && follow?.maxChasePct !== undefined && Number.isFinite(v) && v > 0 ? v : Number(this.settings.maxChasePct ?? 25);
+    const base = follow?.maxChasePct !== null && follow?.maxChasePct !== undefined && Number.isFinite(v) && v > 0 ? v : Number(this.settings.maxChasePct ?? 25);
+    const matureCap = Number(follow?.matureMaxChasePct);
+    const mc = Number(token?.marketCapUsd);
+    if (Number.isFinite(matureCap) && matureCap > 0 && Number.isFinite(mc) && mc > Number(follow?.freshMcMaxUsd || 12000)) {
+      return Math.min(base, matureCap);
+    }
+    return base;
   }
 
   /** Losses realized in the last 24 h for one mode (paper or real). */
@@ -868,7 +875,7 @@ export class CopyTradingEngine {
 
     // Pre-cap slippage before the first quote when the known market/curve price has already moved
     // above the trader's fill price, avoiding a second round-trip quote to Jupiter.
-    const maxChasePre = this.maxChaseFor(follow);
+    const maxChasePre = this.maxChaseFor(follow, token);
     if (real && follow.chainId === 'solana' && Number(token.traderFillPriceUsd) > 0 && maxChasePre < 1000 && Number(token.curve?.virtualSolReserves) > 0 && Number(token.curve?.virtualTokenReserves) > 0) {
       const solPxPre = Number(CHAINS.solana?.nativePriceUsd) || 0;
       const vSolPre = Number(token.curve.virtualSolReserves) / 1e9;
@@ -919,7 +926,7 @@ export class CopyTradingEngine {
     const chaseGapPct =
       traderFillPrice > 0 ? ((quote.quotedPriceUsd - traderFillPrice) / traderFillPrice) * 100 : 0;
 
-    if (traderFillPrice > 0 && chaseGapPct > this.maxChaseFor(follow)) {
+    if (traderFillPrice > 0 && chaseGapPct > this.maxChaseFor(follow, token)) {
       if (!dryRun) this.markCopiedCycle(follow.id, token.address, 'missed');
       return this.recordSkip({
         dryRun,
@@ -935,7 +942,7 @@ export class CopyTradingEngine {
     // The swap's allowed slippage is cut so the fill can never land more than max chase above the
     // trader's own price (a quote 10% above them with 15% slippage could otherwise fill +26%).
     // No room left → skipped. One fresh quote at the tighter slippage when needed.
-    const maxChase = this.maxChaseFor(follow);
+    const maxChase = this.maxChaseFor(follow, token);
     let entryCeilingUsd = null;
     if (real && Number(token.traderFillPriceUsd) > 0 && maxChase < 1000) {
       entryCeilingUsd = Number(token.traderFillPriceUsd) * (1 + maxChase / 100);
@@ -1743,7 +1750,7 @@ export class CopyTradingEngine {
         }
       }
 
-      if (rules.floor?.enabled) {
+      if (rules.floor?.enabled && ageSec >= Number(rules.floor.graceSec || 0)) {
         const activeFloorDrop =
           ageSec >= Number(rules.floor.tightensAfterSec)
             ? Math.abs(Number(rules.floor.tightFloorPct))

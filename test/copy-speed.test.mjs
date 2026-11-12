@@ -1067,3 +1067,79 @@ test('S21 Edit A + Edit B + Items #1–#4: parseSwapFromTransaction curve extrac
   assert.equal(sellRes.ok, true);
   assert.equal(rpcCalls.filter((m) => m === 'getMultipleAccounts').length, 0, 'Item #2: 0 getMultipleAccounts RPC calls on mirror sell when traderSellCurve is stamped with .at');
 });
+
+test('S22 Nov 11 4-edit calibration: smart maxChase (30% <=$12k MC, 26.5% >$12k MC), 4s floor grace, 22% trail arm, and $100k maxMarketCapUsd', async () => {
+  const { restoreEngine } = await import('../engine/persistence.mjs');
+  const e = new CopyTradingEngine();
+  e.resetToCleanState();
+  e.settings.paperTrading = true;
+  restoreEngine(e, {
+    follows: [{
+      id: 'fol-03782071',
+      walletId: e.getActiveWallet().id,
+      name: '4vw5…9Ud9',
+      handle: '4vw5…9Ud9',
+      traderWallet: '4vw54BmAogeRV3vPKWyFet5yf8DTLcREzdSzx4rw9Ud9',
+      chainId: 'solana',
+      status: 'copying',
+      mode: 'auto-exit',
+      mirrorSells: true,
+      sizing: { type: 'fixed', amount: 25 },
+      minTradeUsd: 1,
+      maxOpenPositions: 10,
+      maxAtRiskUsd: 1000,
+      exitRules: {
+        takeInitials: { enabled: true, takeAtPct: 35, sellSizePct: 100 },
+        moonbagTrail: { enabled: true, trailPct: 10, armsAtPct: 12 },
+        floor: { enabled: true, openingFloorPct: 25, tightensAfterSec: 45, tightFloorPct: 15 },
+        waveCut: { enabled: true, afterSec: 25, needsPeakPct: 8 },
+        hardTimeCap: { enabled: true, timeCapSec: 180 },
+      },
+      filtersOverride: { minTraderBuyNative: 0.5 },
+      decuV3Migrated: true,
+      decuV5Migrated: true,
+    }],
+  });
+
+  const f = e.follows[0];
+  assert.equal(f.maxChasePct, 30);
+  assert.equal(f.matureMaxChasePct, 26.5);
+  assert.equal(f.exitRules.moonbagTrail.armsAtPct, 22);
+  assert.equal(f.exitRules.floor.graceSec, 4);
+  assert.equal(f.filtersOverride.maxMarketCapUsd, 100000);
+
+  // Edit #1: Qi ($9.1k MC <= $12k) allows 27.56% chase (<= 30%), while GIF ($13.9k MC > $12k) caps at 26.5%
+  assert.equal(e.maxChaseFor(f, { marketCapUsd: 9100 }), 30);
+  assert.equal(e.maxChaseFor(f, { marketCapUsd: 13900 }), 26.5);
+
+  // Edit #4: updog ($780.3k MC > $100k limit) is skipped by market cap filter
+  const [updogRes] = await e.processTraderSignal({
+    chainId: 'solana', side: 'buy', traderHandle: f.handle, traderWallet: f.traderWallet, traderBuyUsd: 200, traderBuyNative: 1.5,
+    token: { address: 'updogMint111111111111111111111111111111111', symbol: 'updog', isLaunchpad: true, marketCapUsd: 780_300, traderFillPriceUsd: 0.00078, currentPriceUsd: 0.00080, safety: { safetyVerified: true } },
+  });
+  assert.equal(updogRes.status, 'skipped');
+  assert.equal(updogRes.reason, 'market cap outside your filter');
+
+  // Edit #2 & #3: BERNIE #2 (-26% dip at 2.0s holds during 4s grace) & DANIELA (+13.7% peak does not arm 22% trail)
+  const [danRes] = await e.processTraderSignal({
+    chainId: 'solana', side: 'buy', traderHandle: f.handle, traderWallet: f.traderWallet, traderBuyUsd: 200, traderBuyNative: 1.5,
+    token: { address: 'danMint11111111111111111111111111111111111', symbol: 'DANIELA', isLaunchpad: true, marketCapUsd: 27_500, traderFillPriceUsd: 0.000025, currentPriceUsd: 0.000027, safety: { safetyVerified: true } },
+  });
+  assert.equal(danRes.status, 'filled');
+  const pos = danRes.position;
+  // +13.7% peak then 11% pullback at 1.2s does NOT arm or trigger moonbagTrail (needs +22%)
+  pos.peakPriceUsd = pos.entryPriceUsd * 1.137;
+  pos.currentPriceUsd = pos.peakPriceUsd * 0.88;
+  await e.evaluatePositionExits(pos, pos.openedAt + 1200);
+  assert.equal(pos.trailArmed, false);
+  assert.ok(pos.remainingTokens > 0, 'DANIELA holds past 1.2s shakeout');
+
+  // -26% wick at 2.0s is ignored during 4s opening floor grace period (BERNIE #2)
+  pos.currentPriceUsd = pos.entryPriceUsd * 0.74;
+  await e.evaluatePositionExits(pos, pos.openedAt + 2000);
+  assert.ok(pos.remainingTokens > 0, 'BERNIE #2 holds during 4s opening floor grace period');
+
+  // After 4.5s, if still at -26%, the -25% opening floor triggers normally
+  await e.evaluatePositionExits(pos, pos.openedAt + 4500);
+  assert.equal(pos.remainingTokens, 0, 'opening floor triggers normally once 4s grace period has elapsed');
+});
