@@ -62,7 +62,7 @@ export function restoreEngine(engine, data) {
         f.decuV4Migrated = true;
         f.decuV5Migrated = true;
       }
-      if ((f.id === 'fol-03782071' || f.traderWallet === '4vw54BmAogeRV3vPKWyFet5yf8DTLcREzdSzx4rw9Ud9') && !f.decuV6Migrated) {
+      if ((f.id === 'fol-03782071' || f.traderWallet === '4vw54BmAogeRV3vPKWyFet5yf8DTLcREzdSzx4rw9Ud9') && !f.decuV7Migrated) {
         f.mode = 'auto-exit';
         f.mirrorSells = true;
         const curRules = f.exitRules || followTraderExitRules();
@@ -70,8 +70,8 @@ export function restoreEngine(engine, data) {
           ...curRules,
           takeInitials: { ...(curRules.takeInitials || {}), enabled: true, takeAtPct: Number(curRules.takeInitials?.takeAtPct) >= 25 ? Number(curRules.takeInitials.takeAtPct) : 35, sellSizePct: 100 },
           moonbagTrail: { ...(curRules.moonbagTrail || {}), enabled: true, trailPct: Number(curRules.moonbagTrail?.trailPct) || 10, armsAtPct: 22 },
-          floor: { ...(curRules.floor || {}), enabled: true, openingFloorPct: Number(curRules.floor?.openingFloorPct) || 25, tightensAfterSec: Number(curRules.floor?.tightensAfterSec) || 45, tightFloorPct: Number(curRules.floor?.tightFloorPct) || 15, graceSec: 4 },
-          waveCut: { ...(curRules.waveCut || {}), enabled: true, afterSec: Number(curRules.waveCut?.afterSec) || 25, needsPeakPct: Number(curRules.waveCut?.needsPeakPct) || 8 },
+          floor: { ...(curRules.floor || {}), enabled: true, openingFloorPct: Number(curRules.floor?.openingFloorPct) || 25, tightensAfterSec: Number(curRules.floor?.tightensAfterSec) || 18, tightFloorPct: Number(curRules.floor?.tightFloorPct) || 14, graceSec: 4 },
+          waveCut: { ...(curRules.waveCut || {}), enabled: true, afterSec: Number(curRules.waveCut?.afterSec) || 25, needsPeakPct: Number(curRules.waveCut?.needsPeakPct) || 4 },
           hardTimeCap: { ...(curRules.hardTimeCap || {}), enabled: true, timeCapSec: Number(curRules.hardTimeCap?.timeCapSec) || 180 },
         };
         f.maxChasePct = 30;
@@ -79,6 +79,7 @@ export function restoreEngine(engine, data) {
         f.freshMcMaxUsd = 12000;
         f.filtersOverride = { ...(f.filtersOverride || {}), maxMarketCapUsd: 100000 };
         f.decuV6Migrated = true;
+        f.decuV7Migrated = true;
       }
     }
   }
