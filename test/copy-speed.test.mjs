@@ -1142,4 +1142,11 @@ test('S22 Nov 11 4-edit calibration: smart maxChase (30% <=$12k MC, 26.5% >$12k 
   // After 4.5s, if still at -26%, the -25% opening floor triggers normally
   await e.evaluatePositionExits(pos, pos.openedAt + 4500);
   assert.equal(pos.remainingTokens, 0, 'opening floor triggers normally once 4s grace period has elapsed');
+
+  // When Jito tip is active on a buy, SetComputeUnitPrice is capped at 0.00035 SOL (3,684,211 microLamports/CU)
+  // so reverted 6042 buys cost ~$0.03 instead of ~$0.21, while sells still get full 38,461,538 microLamports/CU.
+  const buyWithJito = priorityMicroLamportsFor({ mode: 'turbo' }, 95_000, null, { tradeSol: 0.30, side: 'buy', tipLamports: 750_000 });
+  const sellWithJito = priorityMicroLamportsFor({ mode: 'turbo' }, 65_000, null, { tradeSol: 0.30, side: 'sell', tipLamports: 0 });
+  assert.equal(buyWithJito, 3_684_211);
+  assert.equal(sellWithJito, 38_461_538);
 });

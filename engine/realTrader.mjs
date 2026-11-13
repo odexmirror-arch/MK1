@@ -30,7 +30,7 @@ const DAY_MS = 86_400_000;
  * When `tradeSol` is provided on 'fast' or 'turbo' presets, caps priority spend proportionally on
  * small swaps (e.g. ~0.00025–0.00035 SOL on an $8 / ~0.083 SOL trade) so priority fees never eat TP.
  */
-export function priorityMicroLamportsFor(priorityFee, cuUnits = 100_000, envOverride = null, { tradeSol = null } = {}) {
+export function priorityMicroLamportsFor(priorityFee, cuUnits = 100_000, envOverride = null, { tradeSol = null, side = null, tipLamports = 0 } = {}) {
   if (envOverride !== null && envOverride !== undefined && String(envOverride).trim() !== '') {
     const ov = Number(envOverride);
     if (Number.isFinite(ov) && ov > 0) return Math.floor(ov);
@@ -54,6 +54,11 @@ export function priorityMicroLamportsFor(priorityFee, cuUnits = 100_000, envOver
           ? Math.max(0.0025, sz * 0.008)
           : Math.max(0.001, sz * 0.005);
     targetSol = Math.min(targetSol, sizeCap);
+  }
+  // When an atomic Jito tip instruction is attached to a buy, cap non-refundable SetComputeUnitPrice
+  // at 0.00035 SOL (~$0.03) so reverted 6042 slippage-guard buys do not burn 0.0025 SOL (~$0.21).
+  if (side === 'buy' && Number(tipLamports) > 0) {
+    targetSol = Math.min(targetSol, 0.00035);
   }
   const units = Math.max(20_000, Number(cuUnits) || 100_000);
   const micro = Math.round((targetSol * LAMPORTS * 1_000_000) / units);

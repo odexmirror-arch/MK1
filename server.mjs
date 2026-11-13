@@ -121,14 +121,18 @@ let solPriceLive = false;
 const heliusApiKey = process.env.HELIUS_API_KEY ? String(process.env.HELIUS_API_KEY).trim() : null;
 const heliusFastRpc = heliusApiKey ? `https://mainnet.helius-rpc.com/?api-key=${heliusApiKey}` : null;
 const heliusStakedRpc = heliusApiKey ? `https://staked.helius-rpc.com?api-key=${heliusApiKey}` : null;
-const jitoEndpoints = process.env.ODEX_JITO_RPC_URL
-  ? [String(process.env.ODEX_JITO_RPC_URL).trim()]
-  : [
-      'https://mainnet.block-engine.jito.wtf/api/v1/transactions',
-      'https://ny.mainnet.block-engine.jito.wtf/api/v1/transactions',
-      'https://frankfurt.mainnet.block-engine.jito.wtf/api/v1/transactions',
-      'https://amsterdam.mainnet.block-engine.jito.wtf/api/v1/transactions',
-    ];
+const heliusSenderRpc = 'https://sender.helius-rpc.com/fast';
+const DEFAULT_JITO_ENDPOINTS = [
+  'https://mainnet.block-engine.jito.wtf/api/v1/transactions',
+  'https://ny.mainnet.block-engine.jito.wtf/api/v1/transactions',
+  'https://frankfurt.mainnet.block-engine.jito.wtf/api/v1/transactions',
+  'https://amsterdam.mainnet.block-engine.jito.wtf/api/v1/transactions',
+  'https://slc.mainnet.block-engine.jito.wtf/api/v1/transactions',
+];
+const jitoEndpoints = [
+  ...(process.env.ODEX_JITO_RPC_URL ? [String(process.env.ODEX_JITO_RPC_URL).trim()] : []),
+  ...DEFAULT_JITO_ENDPOINTS,
+].filter(Boolean);
 // Sodae (optional): also receives our signed swaps (one credit each) — never used for routine reads,
 // so the free tier's 100k monthly credits last
 const sodaeRpc = String(process.env.SODAE_RPC_URL || '').trim() || null;
@@ -143,7 +147,7 @@ const heliusConfirmWs = heliusApiKey ? `wss://mainnet.helius-rpc.com/?api-key=${
 export const realTrader = new RealTrader({
   env: process.env,
   rpc: (method, params) => liveSignals.watcher.rpc(method, params, { fast: true }),
-  fastRpcUrls: [heliusStakedRpc, heliusFastRpc, liveSignals.watcher.rpcUrl, ...jitoEndpoints, sodaeRpc].filter(Boolean),
+  fastRpcUrls: [heliusSenderRpc, heliusStakedRpc, heliusFastRpc, liveSignals.watcher.rpcUrl, ...jitoEndpoints, sodaeRpc].filter(Boolean),
   confirmWsUrl: heliusConfirmWs,
   solPrice: () => (solPriceLive ? CHAINS.solana.nativePriceUsd : 0),
   state: db ? db.get('realTrader') : null,
@@ -179,7 +183,7 @@ realTrader.jitoTipLamports = (side, tradeSol) =>
   });
 realTrader.priorityMicroLamports = (units, side, tradeSol) => {
   const tipLamports = realTrader.jitoTipLamports(side, tradeSol);
-  const fullMicro = priorityMicroLamportsFor(engine.settings.priorityFee, units, process.env.ODEX_DIRECT_PRIORITY_MICROLAMPORTS, { tradeSol });
+  const fullMicro = priorityMicroLamportsFor(engine.settings.priorityFee, units, process.env.ODEX_DIRECT_PRIORITY_MICROLAMPORTS, { tradeSol, side, tipLamports });
   return fullMicro;
 };
 realTrader.startBlockhashWarmer();
