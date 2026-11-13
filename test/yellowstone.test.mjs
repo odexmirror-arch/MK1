@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import http2 from 'node:http2';
 import crypto from 'node:crypto';
 import { YellowstoneFeed, encodeSubscribeRequest, decodeSubscribeUpdate, pbFields } from '../engine/yellowstone.mjs';
+import { computeDetectLatency } from '../engine/walletWatcher.mjs';
 import { base58Encode } from '../engine/onchainMeta.mjs';
 
 const W1 = '4vw54BmAogeRV3vPKWyFet5yf8DTLcREzdSzx4rw9Ud9';
@@ -106,4 +107,42 @@ test('YS3 live over HTTP/2: subscribes with the key, delivers the trade to the r
   assert.ok(feed.stats.connects >= 1);
   feed.stop();
   server.close();
+});
+
+test('YS4 SubscribeUpdate created_at timestamp + exact computeDetectLatency', () => {
+  const sig = crypto.randomBytes(64);
+  const tsBuf = Buffer.concat([fv(1, 1_794_559_946), fv(2, 125_000_000)]); // .125 s
+  const baseUpdate = txUpdate({ filters: [W1], sig, slot: 463_000_999, logs: ['Program 6EF8 invoke [1]'] });
+  const withTs = Buffer.concat([baseUpdate, fb(11, tsBuf)]);
+  const u = decodeSubscribeUpdate(withTs);
+  assert.equal(u.createdAtMs, 1_794_559_946_125);
+
+  // Exact ms latency from Yellowstone created_at (zero 0.5s rounding bias)
+  const exact = computeDetectLatency({
+    detectedAt: 1_794_559_946_260,
+    receivedAt: 1_794_559_946_255,
+    blockTimeMs: u.createdAtMs,
+    blockTime: 1_794_559_946_000,
+  });
+  assert.equal(exact.streamMs, 5);
+  assert.equal(exact.latencyMs, 135);
+  assert.equal(exact.latencySec, 0.135);
+
+  // Clock-skew guard (>500ms ahead): falls back to streamMs instead of reporting fake/negative delay
+  const skewed = computeDetectLatency({
+    detectedAt: 1_794_559_942_000,
+    receivedAt: 1_794_559_941_992,
+    blockTimeMs: 1_794_559_946_125,
+  });
+  assert.equal(skewed.latencyMs, 8);
+  assert.equal(skewed.latencySec, 0.008);
+
+  // Integer-second blockTime fallback uses unbiased +500ms bucket midpoint
+  const wsFallback = computeDetectLatency({
+    detectedAt: 1_794_559_946_800,
+    receivedAt: 1_794_559_946_790,
+    blockTime: 1_794_559_946_000,
+  });
+  assert.equal(wsFallback.latencyMs, 300);
+  assert.equal(wsFallback.latencySec, 0.3);
 });

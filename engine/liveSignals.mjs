@@ -224,7 +224,7 @@ export class LiveSignalService {
       traderHandle: follow ? follow.handle : sig.label || sig.wallet,
       traderWallet: sig.wallet,
       signature: sig.signature,
-      ageSec: sig.blockTime ? Math.max(0, (Date.now() - sig.blockTime) / 1000) : undefined,
+      ageSec: Number.isFinite(Number(sig.latencySec)) ? Number(sig.latencySec) : sig.blockTime ? Math.max(0, (Date.now() - sig.blockTime) / 1000) : undefined,
       traderBuyUsd: sig.usdValue,
       traderBuyNative: sig.quoteSymbol === 'SOL' ? sig.quoteAmount : undefined,
       // SOL that really reached the pool (no fees/tips): used for the curve maths

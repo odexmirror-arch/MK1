@@ -1094,7 +1094,7 @@ export class CopyTradingEngine {
       // scorecard: how far behind the trader this copy got in
       traderEntryPriceUsd: traderFillPrice > 0 ? traderFillPrice : null,
       entrySlipPct: traderFillPrice > 0 ? Number(((execResult.fillPriceUsd / traderFillPrice - 1) * 100).toFixed(2)) : null,
-      detectLagSec: Number.isFinite(Number(signal.ageSec)) ? Number(Number(signal.ageSec).toFixed(1)) : null,
+      detectLagSec: Number.isFinite(Number(signal.ageSec)) ? Number(Number(signal.ageSec).toFixed(3)) : null,
       currentPriceUsd: execResult.fillPriceUsd,
       peakPriceUsd: execResult.fillPriceUsd,
       entryMarketCapUsd: entryMc,
@@ -2109,7 +2109,7 @@ export class CopyTradingEngine {
       avgEntrySlipPct: r2(aIn), // + = we bought higher than the trader
       avgExitSlipPct: r2(aOut), // − = we sold lower than the trader (Mirror sells only)
       roundTripSlipPct: aIn === null && aOut === null ? null : r2((aIn || 0) - (aOut || 0)),
-      avgLagSec: lag.length ? Number(avg(lag).toFixed(1)) : null,
+      avgLagSec: lag.length ? Number(avg(lag).toFixed(2)) : null,
       measuredSlip: slipIn.length,
       measuredExits: slipOut.length,
     };

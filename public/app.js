@@ -1647,7 +1647,7 @@ function traderScoreHtml(f) {
               <div class="score-item" title="How much higher our copies bought than the trader did"><span>Entry slip</span><strong class="mono">${pct(sc.avgEntrySlipPct)}</strong><em>vs trader buy</em></div>
               <div class="score-item" title="Mirror sells: our sell price vs the trader's (negative = we sold lower)"><span>Exit slip</span><strong class="mono">${pct(sc.avgExitSlipPct)}</strong><em>${sc.measuredExits ? `${sc.measuredExits} mirror sell${sc.measuredExits === 1 ? '' : 's'}` : 'no mirror sells'}</em></div>
               <div class="score-item ${slipBad ? 'is-bad' : ''}" title="Entry slip minus exit slip: what copying this trader costs per trade"><span>Total slip</span><strong class="mono">${pct(sc.roundTripSlipPct)}</strong><em>limit ${cfg.maxSlipPct}%</em></div>
-              <div class="score-item ${lagBad ? 'is-bad' : ''}" title="Seconds between the trader's trade landing and our copy"><span>Detect delay</span><strong class="mono">${sc.avgLagSec === null ? '—' : `${sc.avgLagSec.toFixed(1)}s`}</strong><em>limit ${cfg.maxLagSec}s</em></div>
+              <div class="score-item ${lagBad ? 'is-bad' : ''}" title="Seconds between the trader's trade landing and our copy"><span>Detect delay</span><strong class="mono">${sc.avgLagSec === null ? '—' : `${sc.avgLagSec.toFixed(2)}s`}</strong><em>limit ${cfg.maxLagSec}s</em></div>
             </div>
           </div>`;
 }

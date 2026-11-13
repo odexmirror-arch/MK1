@@ -98,6 +98,33 @@ function uiAmount(tb) {
 }
 
 /**
+ * Exact detection delay in milliseconds/seconds:
+ * - When blockTimeMs is present (Yellowstone gRPC created_at with ms/ns precision),
+ *   measures detectedAt - blockTimeMs (falling back to streamMs only if clock skew > 500 ms).
+ * - Otherwise blockTime is only integer-second precision (floored to .000), so we use the
+ *   unbiased bucket midpoint (blockTime + 500) to eliminate the artificial +500 ms rounding floor.
+ */
+export function computeDetectLatency({ detectedAt, receivedAt = null, blockTimeMs = null, blockTime = null } = {}) {
+  const now = Number(detectedAt) || Date.now();
+  const streamMs = receivedAt ? Math.max(0, now - Number(receivedAt)) : null;
+  let latencyMs = null;
+  if (Number.isFinite(blockTimeMs)) {
+    const rawMs = now - blockTimeMs;
+    latencyMs = rawMs >= -500 ? Math.max(streamMs ?? 0, Math.round(rawMs)) : streamMs;
+  } else if (Number.isFinite(blockTime) && blockTime > 0) {
+    const midMs = now - (blockTime + 500);
+    latencyMs = Math.max(streamMs ?? 0, Math.round(midMs));
+  } else {
+    latencyMs = streamMs;
+  }
+  return {
+    streamMs,
+    latencyMs,
+    latencySec: latencyMs !== null ? Number((latencyMs / 1000).toFixed(3)) : null,
+  };
+}
+
+/**
  * Pure function: given a `getTransaction` result (encoding jsonParsed) and the watched
  * wallet, return the swap the wallet made, or `{ skip: reason }` if it wasn't a simple
  * buy or sell against SOL / USDC / USDT.
@@ -250,6 +277,7 @@ export function parseSwapFromTransaction(tx, wallet) {
     signature: tx.transaction.signatures?.[0] || null,
     slot: tx.slot ?? null,
     blockTime: tx.blockTime ? tx.blockTime * 1000 : null,
+    blockTimeMs: Number.isFinite(tx.blockTimeMs) ? tx.blockTimeMs : null,
     // where it traded: decided from the programs in the transaction, not from a data feed
     venue: swapVenue,
     curve:
@@ -858,6 +886,7 @@ export class SolanaWalletWatcher {
       return null;
     }
     this.fastStats.hits += 1;
+    if (Number.isFinite(ev.createdAtMs) && !Number.isFinite(swap.blockTimeMs)) swap.blockTimeMs = ev.createdAtMs;
     let signal = null;
     try {
       signal = await this.processSignature(w, sig, { backfill: false, via: 'fast-logs', receivedAt: ev.receivedAt, knownSwap: swap });
@@ -937,6 +966,7 @@ export class SolanaWalletWatcher {
     }
     const swap = swapFromPumpTrade(trade, { signature: sig, slot: ev.slot ?? null, heldAfterRaw, receivedAt: ev.receivedAt || Date.now() });
     if (!swap) return null;
+    if (Number.isFinite(ev.createdAtMs) && !Number.isFinite(swap.blockTimeMs)) swap.blockTimeMs = ev.createdAtMs;
     this.fastStats.hits += 1;
     let signal = null;
     try {
@@ -1398,9 +1428,8 @@ export class SolanaWalletWatcher {
       explorerUrl: `https://solscan.io/tx/${sig}`,
       blockTime: swap.blockTime,
       detectedAt: Date.now(),
-      latencySec: swap.blockTime ? Math.max(0, Math.round((Date.now() - swap.blockTime) / 1000)) : null,
+      ...computeDetectLatency({ detectedAt: Date.now(), receivedAt, blockTimeMs: swap.blockTimeMs, blockTime: swap.blockTime }),
       via,
-      streamMs: receivedAt ? Date.now() - receivedAt : null, // push received → signal ready
       backfill: Boolean(backfill),
     };
     this.emittedSigs.set(sig, swap.tokenMint);
@@ -1914,7 +1943,7 @@ export class SolanaWalletWatcher {
       source,
       blockTime: swap.blockTime,
       detectedAt: Date.now(),
-      latencySec: swap.blockTime ? Math.max(0, Math.round((Date.now() - swap.blockTime) / 1000)) : null,
+      ...computeDetectLatency({ detectedAt: Date.now(), blockTimeMs: swap.blockTimeMs, blockTime: swap.blockTime }),
       backfill: Boolean(backfill),
     };
   }
