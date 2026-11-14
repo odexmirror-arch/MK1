@@ -85,7 +85,7 @@ export function jitoTipLamportsFor(priorityFee, { side = 'buy', tradeSol = null,
   const hasSz = Number.isFinite(sz) && sz > 0;
   let tip = 100_000; // 0.0001 SOL on normal
   if (mode === 'turbo') {
-    tip = hasSz ? Math.min(1_500_000, Math.max(250_000, Math.round(sz * 2_500_000))) : 1_500_000;
+    tip = hasSz ? Math.min(2_500_000, Math.max(500_000, Math.round(sz * 5_200_000))) : 2_200_000;
   } else if (mode === 'fast') {
     tip = hasSz ? Math.min(600_000, Math.max(150_000, Math.round(sz * 1_500_000))) : 600_000;
   } else if (mode === 'custom') {

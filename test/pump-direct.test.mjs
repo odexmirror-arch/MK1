@@ -572,7 +572,8 @@ test('PD23 Turbo direct buy with Jito endpoint attaches atomic SystemProgram.tra
   assert.equal(PD.JITO_TIP_ACCOUNTS.length, 8);
   for (const acc of PD.JITO_TIP_ACCOUNTS) assert.equal(base58Decode(acc).length, 32);
 
-  assert.equal(jitoTipLamportsFor({ mode: 'turbo' }, { side: 'buy', tradeSol: 0.72, hasJito: true }), 1_500_000);
+  assert.equal(jitoTipLamportsFor({ mode: 'turbo' }, { side: 'buy', tradeSol: 0.72, hasJito: true }), 2_500_000);
+  assert.equal(jitoTipLamportsFor({ mode: 'turbo' }, { side: 'buy', tradeSol: 0.42, hasJito: true }), 2_184_000);
   assert.equal(jitoTipLamportsFor({ mode: 'turbo' }, { side: 'sell', tradeSol: 0.72, hasJito: true }), 0);
   assert.equal(jitoTipLamportsFor({ mode: 'turbo' }, { side: 'buy', tradeSol: 0.72, hasJito: true, envTipLamports: '0' }), 0);
 
@@ -624,7 +625,7 @@ test('PD23 Turbo direct buy with Jito endpoint attaches atomic SystemProgram.tra
   const tipIx = ixs.find((ix) => ix.programId === PD.SYSTEM_PROGRAM && ix.data.length === 12 && ix.data.readUInt32LE(0) === 2);
   assert.ok(tipIx, 'Jito SystemProgram.transfer tip instruction included');
   assert.ok(PD.JITO_TIP_ACCOUNTS.includes(tipIx.accounts[1]), `tip sent to official Jito tip account: ${tipIx.accounts[1]}`);
-  assert.equal(tipIx.data.readBigUInt64LE(4), 812_500n, 'size-calibrated Jito tip for 0.325 SOL ($65 @ $200/SOL) buy');
+  assert.equal(tipIx.data.readBigUInt64LE(4), 1_690_000n, 'size-calibrated Jito tip for 0.325 SOL ($65 @ $200/SOL) buy');
   assert.ok(blastedUrls.includes('https://mainnet.helius-rpc.com/?api-key=test'), 'Helius URL unchanged');
   assert.ok(blastedUrls.includes('https://mainnet.block-engine.jito.wtf/api/v1/transactions?bundleOnly=true'), 'Jito blasted with bundleOnly=true');
 });

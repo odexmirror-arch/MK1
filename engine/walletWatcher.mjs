@@ -108,10 +108,10 @@ export function computeDetectLatency({ detectedAt, receivedAt = null, blockTimeM
   const now = Number(detectedAt) || Date.now();
   const streamMs = receivedAt ? Math.max(0, now - Number(receivedAt)) : null;
   let latencyMs = null;
-  if (Number.isFinite(blockTimeMs)) {
-    const rawMs = now - blockTimeMs;
-    latencyMs = rawMs >= -500 ? Math.max(streamMs ?? 0, Math.round(rawMs)) : streamMs;
-  } else if (Number.isFinite(blockTime) && blockTime > 0) {
+  const geyserDelta = Number.isFinite(blockTimeMs) ? now - blockTimeMs : null;
+  if (geyserDelta !== null && geyserDelta >= 0 && geyserDelta <= 60_000) {
+    latencyMs = Math.max(streamMs ?? 0, Math.round(geyserDelta));
+  } else if (Number.isFinite(blockTime) && blockTime > 0 && now >= blockTime) {
     const midMs = now - (blockTime + 500);
     latencyMs = Math.max(streamMs ?? 0, Math.round(midMs));
   } else {

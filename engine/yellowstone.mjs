@@ -157,11 +157,13 @@ function decodeGrpcTransaction({ signature, slot, fi, mf, err, logs, createdAtMs
     const feeField = first(mf, 2);
     const preTokenBalances = mf.filter((x) => x.field === 7 && x.wire === 2).map((x) => decodeTokenBalance(x.value)).filter(Boolean);
     const postTokenBalances = mf.filter((x) => x.field === 8 && x.wire === 2).map((x) => decodeTokenBalance(x.value)).filter(Boolean);
-    const refMs = Number.isFinite(createdAtMs) ? createdAtMs : Date.now();
+    const nowMs = Date.now();
+    const saneCreatedAt = Number.isFinite(createdAtMs) && createdAtMs <= nowMs ? createdAtMs : null;
+    const refMs = saneCreatedAt ?? nowMs;
     return {
       slot: slot ?? null,
       blockTime: Math.floor(refMs / 1000),
-      blockTimeMs: Number.isFinite(createdAtMs) ? createdAtMs : null,
+      blockTimeMs: saneCreatedAt,
       meta: {
         err: err || null,
         fee: feeField ? Number(feeField.value) : 5000,

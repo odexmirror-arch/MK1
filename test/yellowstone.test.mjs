@@ -128,14 +128,24 @@ test('YS4 SubscribeUpdate created_at timestamp + exact computeDetectLatency', ()
   assert.equal(exact.latencyMs, 135);
   assert.equal(exact.latencySec, 0.135);
 
-  // Clock-skew guard (>500ms ahead): falls back to streamMs instead of reporting fake/negative delay
+  // Skewed Geyser clock (created_at ahead of UTC): ignores skewed Geyser ts and falls back to real on-chain blockTime midpoint
   const skewed = computeDetectLatency({
+    detectedAt: 1_794_559_942_800,
+    receivedAt: 1_794_559_942_792,
+    blockTimeMs: 1_794_559_946_125,
+    blockTime: 1_794_559_942_000,
+  });
+  assert.equal(skewed.latencyMs, 300);
+  assert.equal(skewed.latencySec, 0.3);
+
+  // Skewed Geyser clock with no blockTime at all falls back to streamMs
+  const skewedNoBlockTime = computeDetectLatency({
     detectedAt: 1_794_559_942_000,
     receivedAt: 1_794_559_941_992,
     blockTimeMs: 1_794_559_946_125,
   });
-  assert.equal(skewed.latencyMs, 8);
-  assert.equal(skewed.latencySec, 0.008);
+  assert.equal(skewedNoBlockTime.latencyMs, 8);
+  assert.equal(skewedNoBlockTime.latencySec, 0.008);
 
   // Integer-second blockTime fallback uses unbiased +500ms bucket midpoint
   const wsFallback = computeDetectLatency({
