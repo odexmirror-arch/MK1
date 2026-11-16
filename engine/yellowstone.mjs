@@ -122,16 +122,7 @@ function decodeTokenBalance(buf) {
   };
 }
 
-function decodeTimestampMs(buf) {
-  if (!buf || !buf.length) return null;
-  const f = pbFields(buf);
-  const sec = Number(first(f, 1)?.value ?? 0);
-  const nanos = Number(first(f, 2)?.value ?? 0);
-  if (!Number.isFinite(sec) || sec <= 0) return null;
-  return sec * 1000 + (Number.isFinite(nanos) ? nanos / 1e6 : 0);
-}
-
-function decodeGrpcTransaction({ signature, slot, fi, mf, err, logs, createdAtMs = null }) {
+function decodeGrpcTransaction({ signature, slot, fi, mf, err, logs }) {
   try {
     const txMsgField = first(fi, 3);
     if (!txMsgField || txMsgField.wire !== 2) return null;
@@ -157,13 +148,9 @@ function decodeGrpcTransaction({ signature, slot, fi, mf, err, logs, createdAtMs
     const feeField = first(mf, 2);
     const preTokenBalances = mf.filter((x) => x.field === 7 && x.wire === 2).map((x) => decodeTokenBalance(x.value)).filter(Boolean);
     const postTokenBalances = mf.filter((x) => x.field === 8 && x.wire === 2).map((x) => decodeTokenBalance(x.value)).filter(Boolean);
-    const nowMs = Date.now();
-    const saneCreatedAt = Number.isFinite(createdAtMs) && createdAtMs <= nowMs ? createdAtMs : null;
-    const refMs = saneCreatedAt ?? nowMs;
     return {
       slot: slot ?? null,
-      blockTime: Math.floor(refMs / 1000),
-      blockTimeMs: saneCreatedAt,
+      blockTime: Math.floor(Date.now() / 1000),
       meta: {
         err: err || null,
         fee: feeField ? Number(feeField.value) : 5000,
@@ -219,15 +206,12 @@ export function decodeSubscribeUpdate(buf) {
     const slotNum = slot ? Number(slot.value) : null;
     const errObj = errField && errField.value?.length ? { encoded: errField.value.toString('base64') } : null;
     const logsList = logsNone && logsNone.value ? null : logs;
-    const createdAtField = first(f, 11);
-    const createdAtMs = createdAtField && createdAtField.wire === 2 ? decodeTimestampMs(createdAtField.value) : null;
-    const parsedTx = !errObj ? decodeGrpcTransaction({ signature, slot: slotNum, fi, mf, err: errObj, logs: logsList, createdAtMs }) : null;
+    const parsedTx = !errObj ? decodeGrpcTransaction({ signature, slot: slotNum, fi, mf, err: errObj, logs: logsList }) : null;
     const out = {
       kind: 'tx',
       filters,
       signature,
       slot: slotNum,
-      createdAtMs,
       // any TransactionError means the transaction failed (its exact code is not needed here)
       err: errObj,
       logs: logsList,
@@ -418,7 +402,7 @@ export class YellowstoneFeed {
     for (const address of addresses) {
       if (!this.wallets.has(address)) continue;
       try {
-        this.onTx(address, { signature: u.signature, err: u.err, logs: u.logs, slot: u.slot, tx: u.tx || null, createdAtMs: u.createdAtMs ?? null, receivedAt });
+        this.onTx(address, { signature: u.signature, err: u.err, logs: u.logs, slot: u.slot, tx: u.tx || null, receivedAt });
       } catch {
         // listener errors never break the feed
       }
