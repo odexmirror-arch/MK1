@@ -95,17 +95,30 @@ export const supabase = new SupabaseMirror({
   table: process.env.SUPABASE_TABLE || 'odex_kv',
 });
 export const persistence = db ? new PersistenceManager({ engine, live: liveSignals, store: db, cloud: supabase }) : null;
+function hasEngineRecords(eng) {
+  if (!eng || typeof eng !== 'object') return false;
+  return (
+    (Array.isArray(eng.positions) && eng.positions.length > 0) ||
+    (Array.isArray(eng.history) && eng.history.length > 0) ||
+    (Array.isArray(eng.realizedLog) && eng.realizedLog.length > 0) ||
+    (Array.isArray(eng.traderLog) && eng.traderLog.length > 0)
+  );
+}
 // Fresh install or newer cloud state (e.g. Railway active while opening localhost): restore from Supabase first
+let startupCloudPullFailed = false;
 if (persistence && supabase.enabled) {
   try {
     const localEngine = db.get('engine');
     const rows = await supabase.pullAll();
     const remoteEngine = rows.get('engine');
-    if (remoteEngine && (!localEngine || (Number(remoteEngine.savedAt) || 0) > (Number(localEngine.savedAt) || 0))) {
+    const remoteNewer = (Number(remoteEngine?.savedAt) || 0) > (Number(localEngine?.savedAt) || 0);
+    const localEmpty = !hasEngineRecords(localEngine) && hasEngineRecords(remoteEngine);
+    if (remoteEngine && (!localEngine || localEmpty || (remoteNewer && (hasEngineRecords(remoteEngine) || !hasEngineRecords(localEngine))))) {
       db.setMany([...rows.entries()].filter(([k]) => k === 'engine' || k === 'liveSignals' || k === 'realTrader' || k === 'daxChat'));
       console.log(`Database: restored from Supabase (${localEngine ? 'cloud state was newer than local' : 'local database was empty'})`);
     }
   } catch (err) {
+    startupCloudPullFailed = true;
     console.log(`Supabase: could not restore on startup (${err.message})`);
   }
 }
@@ -257,13 +270,14 @@ async function instanceHeartbeat() {
     otherInstance = null;
     await supabase.push([['instance_lock', { id: INSTANCE_ID, host: ON_RAILWAY ? 'Railway' : 'your PC', at: now }]]);
     ownsLock = true;
-    if (takingOver && persistence) {
+    if ((takingOver || startupCloudPullFailed) && persistence) {
       // Taking over: load what the other copy saved last (trades it made while we waited), then
-      // resume uploads. Only if the cloud data is newer than what we started with.
+      // resume uploads. Also load if this copy booted with an empty engine while Supabase has records.
       try {
         const rows = await supabase.pullAll();
         const cloudEngine = rows.get('engine');
-        if (cloudEngine && Number(cloudEngine.savedAt || 0) > startedAt) {
+        const localEmpty = !hasEngineRecords(engine) && hasEngineRecords(cloudEngine);
+        if (cloudEngine && (localEmpty || (Number(cloudEngine.savedAt || 0) > startedAt && (hasEngineRecords(cloudEngine) || !hasEngineRecords(engine))))) {
           persistence.restoreFromRows(rows);
           liveSignals.sync();
           applyDaxAi();
@@ -274,10 +288,17 @@ async function instanceHeartbeat() {
           realTrader.trades = rt.trades;
           if (Array.isArray(rt.spendLog)) realTrader.spendLog = rt.spendLog;
         }
+        startupCloudPullFailed = false;
+        persistence.cloudPaused = false;
       } catch (err) {
         console.log(`One-bot lock: could not load the latest data (${err.message})`);
+        if (!hasEngineRecords(engine)) {
+          ownsLock = false;
+          persistence.cloudPaused = true;
+          return;
+        }
+        persistence.cloudPaused = false;
       }
-      persistence.cloudPaused = false;
       try {
         engine.reconcileRealTrades(realTrader.trades);
       } catch {
@@ -1953,15 +1974,30 @@ export const server = http.createServer(async (req, res) => {
       }
       supabase.configure({ url: sbUrl, key: sbKey, table: trial.table });
       let pushed = false;
+      let restored = null;
       if (persistence) {
         try {
-          const entries = [['engine', serializeEngine(engine)], ['liveSignals', serializeLive(liveSignals)]];
-          pushed = await supabase.push(entries);
+          const rows = await supabase.pullAll();
+          const remoteEngine = rows.get('engine');
+          if (!hasEngineRecords(engine) && hasEngineRecords(remoteEngine)) {
+            restored = persistence.restoreFromRows(rows);
+            const rt = rows.get('realTrader');
+            if (rt && Array.isArray(rt.trades) && rt.trades.length >= realTrader.trades.length) {
+              realTrader.trades = rt.trades;
+              if (Array.isArray(rt.spendLog)) realTrader.spendLog = rt.spendLog;
+            }
+            liveSignals.sync();
+            applyDaxAi();
+            engine.emit('state_restored', restored);
+          } else {
+            const entries = [['engine', serializeEngine(engine)], ['liveSignals', serializeLive(liveSignals)]];
+            pushed = await supabase.push(entries);
+          }
         } catch {
           pushed = false;
         }
       }
-      return sendJson(res, 200, { ok: true, pushed, ...supabase.status() });
+      return sendJson(res, 200, { ok: true, pushed, restored, ...supabase.status() });
     }
     if (pathname === '/api/db/supabase/sync' && req.method === 'POST') {
       if (!supabase.enabled) return sendJson(res, 400, { ok: false, error: 'Supabase is not connected.', ...supabase.status() });
@@ -1976,8 +2012,16 @@ export const server = http.createServer(async (req, res) => {
       if (!supabase.enabled) return sendJson(res, 400, { ok: false, error: 'Supabase is not connected.' });
       if (!persistence) return sendJson(res, 400, { ok: false, error: 'Database is turned off.' });
       try {
-        const restored = persistence.restoreFromRows(await supabase.pullAll());
+        const rows = await supabase.pullAll();
+        const restored = persistence.restoreFromRows(rows);
+        const rt = rows.get('realTrader');
+        if (rt && Array.isArray(rt.trades)) {
+          realTrader.trades = rt.trades;
+          if (Array.isArray(rt.spendLog)) realTrader.spendLog = rt.spendLog;
+          db?.set('realTrader', realTrader.exportState());
+        }
         liveSignals.sync();
+        applyDaxAi();
         engine.emit('state_restored', restored);
         return sendJson(res, 200, { ok: true, restored, state: engine.getStateSnapshot() });
       } catch (err) {

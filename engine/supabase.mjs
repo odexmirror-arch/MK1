@@ -64,7 +64,7 @@ export class SupabaseMirror {
 
   async request(method, query, body, extraHeaders) {
     const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), 10_000);
+    const t = setTimeout(() => ctrl.abort(), 25_000);
     try {
       const res = await this.fetch(this.endpoint(query), {
         method,
